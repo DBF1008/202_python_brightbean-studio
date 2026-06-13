@@ -667,6 +667,11 @@ class CSVImportJob(models.Model):
         default=dict,
         help_text='{"created": N, "errors": N, "warnings": [...]}',
     )
+    error_details = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Per-row error records, capped at 100 entries.",
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -678,6 +683,13 @@ class CSVImportJob(models.Model):
 
     def __str__(self):
         return f"CSVImportJob({self.status}): {self.total_rows} rows"
+
+    @property
+    def progress_pct(self):
+        """Return progress as an integer 0-100."""
+        if not self.total_rows:
+            return 0
+        return min(100, int(self.processed_rows / self.total_rows * 100))
 
 
 class Feed(models.Model):
