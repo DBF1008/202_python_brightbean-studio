@@ -122,6 +122,82 @@ class InboxMessage(models.Model):
     def platform(self):
         return self.social_account.platform
 
+    # ------------------------------------------------------------------
+    # SLA state helpers
+    # ------------------------------------------------------------------
+
+    _ACTIVE_STATUSES = {Status.UNREAD, Status.OPEN}
+
+    @staticmethod
+    def compute_sla_fingerprint(status: str, assigned_to_id, config_version: int) -> str:
+        """Return a deterministic fingerprint string for the given SLA-relevant state.
+
+        The fingerprint changes whenever:
+        * the message status transitions between active (unread/open) and inactive
+          (resolved/archived) — covering reopen scenarios;
+        * the assignee changes — covering reassignment;
+        * the SLA config version bumps — covering target-time or toggle changes.
+        """
+        active = status in InboxMessage._ACTIVE_STATUSES
+        return f"{int(active)}:{assigned_to_id or 'none'}:{config_version}"
+
+    def invalidate_sla_state(self, *, save: bool = True) -> None:
+        """Remove the cached ``sla_state`` so that the next ``check_sla()`` run
+        re-evaluates this message from scratch.
+
+        Called by views on reopen, reassign, bulk resolve/archive/assign, and
+        SLA-config changes so the periodic worker picks up the new state on its
+        next cycle.
+        """
+        if "sla_state" in self.extra:
+            del self.extra["sla_state"]
+            # Also clean up the legacy one-shot flag if still present.
+            self.extra.pop("sla_notified", None)
+            if save:
+                self.save(update_fields=["extra"])
+
+    def reset_sla_clock(self, *, save: bool = True) -> None:
+        """Reset the SLA clock for this message by updating ``received_at`` to now
+        and clearing any cached SLA state.
+
+        Used when a message is reopened (transitions from resolved/archived back
+        to an active status) so the agent gets a fresh SLA window.
+        """
+        from django.utils import timezone as _tz
+
+        self.received_at = _tz.now()
+        if "sla_state" in self.extra:
+            del self.extra["sla_state"]
+        self.extra.pop("sla_notified", None)
+        if save:
+            self.save(update_fields=["extra", "received_at"])
+
+    @classmethod
+    def bulk_invalidate_sla_state(cls, queryset) -> int:
+        """Strip ``sla_state`` (and legacy ``sla_notified``) from every message
+        matched by *queryset* using a single bulk UPDATE where possible.
+
+        Returns the number of rows updated.
+        """
+        # JSONField bulk key-removal is backend-specific, so we fall back to
+        # iterating only the rows that actually carry SLA state.
+        affected = queryset.filter(
+            models.Q(extra__has_key="sla_state") | models.Q(extra__has_key="sla_notified"),
+        )
+        count = 0
+        for msg in affected.only("id", "extra"):
+            changed = False
+            if "sla_state" in msg.extra:
+                del msg.extra["sla_state"]
+                changed = True
+            if "sla_notified" in msg.extra:
+                del msg.extra["sla_notified"]
+                changed = True
+            if changed:
+                msg.save(update_fields=["extra"])
+                count += 1
+        return count
+
 
 class InboxReply(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -222,9 +298,33 @@ class InboxSLAConfig(models.Model):
         default=True,
         help_text="Automatically mark messages as resolved when a reply is sent.",
     )
+    version = models.PositiveIntegerField(
+        default=1,
+        help_text="Incremented whenever target_response_minutes or is_active changes, "
+        "so that check_sla() can detect config updates and re-evaluate overdue notifications.",
+    )
 
     class Meta:
         db_table = "inbox_sla_config"
 
     def __str__(self):
         return f"SLA Config for {self.workspace} ({self.target_response_minutes}min)"
+
+    def save(self, *args, **kwargs):
+        """Bump ``version`` when SLA-relevant fields change.
+
+        We compare against the persisted row (if it exists) so that every
+        meaningful update produces a new version, which in turn invalidates
+        cached ``sla_state`` fingerprints on InboxMessage.
+        """
+        if self.pk:
+            try:
+                old = InboxSLAConfig.objects.get(pk=self.pk)
+                if (
+                    old.target_response_minutes != self.target_response_minutes
+                    or old.is_active != self.is_active
+                ):
+                    self.version = old.version + 1
+            except InboxSLAConfig.DoesNotExist:
+                pass
+        super().save(*args, **kwargs)

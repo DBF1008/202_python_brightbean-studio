@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -m pytest apps/inbox/tests/test_sla.py -x --no-header -q)"
+    ]
+  }
+}

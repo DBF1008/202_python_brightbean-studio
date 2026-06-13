@@ -251,10 +251,12 @@ def send_reply(request, workspace_id, message_id):
     sla_config = InboxSLAConfig.objects.filter(workspace=workspace, is_active=True).first()
     if sla_config and sla_config.auto_resolve_on_reply:
         message.status = InboxMessage.Status.RESOLVED
-        message.save(update_fields=["status"])
+        message.invalidate_sla_state(save=False)
+        message.save(update_fields=["status", "extra"])
     elif message.status == InboxMessage.Status.UNREAD:
         message.status = InboxMessage.Status.OPEN
-        message.save(update_fields=["status"])
+        message.invalidate_sla_state(save=False)
+        message.save(update_fields=["status", "extra"])
 
     context = {"reply": reply, "workspace": workspace, "message": message}
     return render(request, "inbox/partials/_reply_item.html", context)
@@ -314,7 +316,10 @@ def assign_message(request, workspace_id, message_id):
     else:
         message.assigned_to = None
 
-    message.save(update_fields=["assigned_to"])
+    # Reassignment changes who should receive overdue notifications, so
+    # invalidate the cached SLA fingerprint.
+    message.invalidate_sla_state(save=False)
+    message.save(update_fields=["assigned_to", "extra"])
 
     # Notify the assignee
     if message.assigned_to and message.assigned_to != request.user:
@@ -348,8 +353,22 @@ def change_status(request, workspace_id, message_id):
     if not form.is_valid():
         return HttpResponse("Invalid status.", status=400)
 
-    message.status = form.cleaned_data["status"]
-    message.save(update_fields=["status"])
+    old_status = message.status
+    new_status = form.cleaned_data["status"]
+    message.status = new_status
+
+    _ACTIVE = {InboxMessage.Status.UNREAD, InboxMessage.Status.OPEN}
+
+    if old_status not in _ACTIVE and new_status in _ACTIVE:
+        # Reopen: give the agent a fresh SLA window.
+        message.reset_sla_clock(save=False)
+        message.save(update_fields=["status", "extra", "received_at"])
+    elif old_status in _ACTIVE and new_status not in _ACTIVE:
+        # Leaving active state — clear stale SLA state.
+        message.invalidate_sla_state(save=False)
+        message.save(update_fields=["status", "extra"])
+    else:
+        message.save(update_fields=["status"])
 
     context = _detail_context(workspace, message)
     return render(request, "inbox/partials/_message_panel.html", context)
@@ -401,12 +420,16 @@ def bulk_action(request, workspace_id):
     if action == "mark_read":
         qs.filter(status=InboxMessage.Status.UNREAD).update(status=InboxMessage.Status.OPEN)
     elif action == "resolve":
-        qs.exclude(status=InboxMessage.Status.ARCHIVED).update(status=InboxMessage.Status.RESOLVED)
+        target_qs = qs.exclude(status=InboxMessage.Status.ARCHIVED)
+        InboxMessage.bulk_invalidate_sla_state(target_qs)
+        target_qs.update(status=InboxMessage.Status.RESOLVED)
     elif action == "archive":
+        InboxMessage.bulk_invalidate_sla_state(qs)
         qs.update(status=InboxMessage.Status.ARCHIVED)
     elif action == "assign" and value:
         membership = WorkspaceMembership.objects.filter(workspace=workspace, user_id=value).first()
         if membership:
+            InboxMessage.bulk_invalidate_sla_state(qs)
             qs.update(assigned_to=membership.user)
 
     # Re-fetch and return updated list
@@ -506,6 +529,13 @@ def sla_config(request, workspace_id):
         form = SLAConfigForm(request.POST, instance=config)
         if form.is_valid():
             form.save()
+            # The model's save() override bumps ``version`` when SLA-relevant
+            # fields change.  Clear cached SLA state across the workspace so
+            # check_sla() re-evaluates every active message against the new
+            # config on its next cycle.
+            InboxMessage.bulk_invalidate_sla_state(
+                InboxMessage.objects.filter(workspace=workspace),
+            )
             return redirect("inbox:feed", workspace_id=workspace.id)
     else:
         form = SLAConfigForm(instance=config)

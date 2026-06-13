@@ -109,7 +109,12 @@ class InboxSyncEngine:
             )
 
     def check_sla(self):
-        """Check for SLA-overdue messages and send notifications."""
+        """Check for SLA-overdue messages and send notifications.
+
+        Uses a fingerprint-based dedup scheme instead of a one-shot boolean so
+        that overdue notifications re-fire whenever the message's SLA-relevant
+        state changes (reopen, reassignment, or config update).
+        """
         from datetime import timedelta
 
         configs = InboxSLAConfig.objects.filter(is_active=True).select_related("workspace")
@@ -120,11 +125,31 @@ class InboxSyncEngine:
                 workspace=config.workspace,
                 status__in=[InboxMessage.Status.UNREAD, InboxMessage.Status.OPEN],
                 received_at__lte=threshold,
-            ).exclude(extra__has_key="sla_notified")
+            ).select_related("assigned_to")
 
             for message in overdue_messages:
+                fp = InboxMessage.compute_sla_fingerprint(
+                    status=message.status,
+                    assigned_to_id=message.assigned_to_id,
+                    config_version=config.version,
+                )
+
+                stored = message.extra.get("sla_state", {})
+                if stored.get("fp") == fp:
+                    # Already notified for this exact state — skip.
+                    continue
+
+                # Also handle legacy one-shot flag from earlier versions.
+                if "sla_notified" in message.extra and not stored:
+                    # Migrate: treat the old flag as a notification for an
+                    # unknown fingerprint so we always re-evaluate now.
+                    message.extra.pop("sla_notified", None)
+
                 self._notify_sla_overdue(message, config)
-                message.extra["sla_notified"] = True
+                message.extra["sla_state"] = {
+                    "fp": fp,
+                    "notified_at": timezone.now().isoformat(),
+                }
                 message.save(update_fields=["extra"])
 
     def _notify_sla_overdue(self, message, config):
