@@ -4,6 +4,7 @@ import logging
 from datetime import timedelta
 
 from dateutil.relativedelta import relativedelta
+from django.db.models import Q
 from django.utils import timezone
 
 from apps.composer.models import PlatformPost, Post, PostMedia
@@ -21,6 +22,16 @@ def generate_recurring_posts():
     Runs daily. For each active rule, computes recurrence dates from the
     source post's scheduled_at up to 90 days ahead. Creates clones of the
     source post for each date not yet generated.
+
+    **Dedup strategy (idempotent):**
+    A generated recurrence carries a stable ``recurrence_source`` FK back
+    to the originating post.  Dedup therefore uses
+    ``(recurrence_source=<source>, scheduled_at__date)`` — immune to
+    same-caption collisions across different posts and to caption edits
+    on the source.  For backwards compatibility with recurrences that
+    were generated before the field existed, a secondary check matches
+    legacy posts that have the same workspace, caption, and date but no
+    ``recurrence_source``.
     """
     rules = RecurrenceRule.objects.filter(is_active=True).select_related("post")
     now = timezone.now()
@@ -44,14 +55,35 @@ def generate_recurring_posts():
 
         dates = _compute_recurrence_dates(base_date, rule.frequency, rule.interval, end)
 
-        # Filter out dates already generated (posts with same source scheduled time)
+        if not dates:
+            rule.last_generated_at = now
+            rule.save(update_fields=["last_generated_at"])
+            continue
+
+        # ----------------------------------------------------------
+        # Idempotent dedup
+        # ----------------------------------------------------------
+        # Primary: match on stable recurrence_source FK.  This is
+        # immune to caption changes and same-caption collisions.
+        #
+        # Fallback: for legacy posts generated before the
+        # recurrence_source field existed (recurrence_source IS NULL),
+        # match by workspace + caption + date so we don't regenerate
+        # them.  Posts that genuinely have no recurrence relationship
+        # are excluded by requiring recurrence_source IS NULL *and*
+        # the same caption.
+        # ----------------------------------------------------------
         existing_dates = set(
             Post.objects.filter(
-                workspace=source.workspace,
-                caption=source.caption,
+                Q(recurrence_source=source)
+                | Q(
+                    recurrence_source__isnull=True,
+                    workspace=source.workspace,
+                    caption=source.caption,
+                ),
                 scheduled_at__date__in=dates,
             )
-            .exclude(id=source.id)
+            .exclude(pk=source.pk)
             .values_list("scheduled_at__date", flat=True)
         )
 
@@ -65,16 +97,18 @@ def generate_recurring_posts():
             if base_tz:
                 scheduled_dt = scheduled_dt.replace(tzinfo=base_tz)
 
-            # Clone the post
+            # Clone the post — recurrence_source stamps the lineage
             new_post = Post.objects.create(
                 workspace=source.workspace,
                 author=source.author,
+                title=source.title,
                 caption=source.caption,
                 first_comment=source.first_comment,
                 internal_notes=source.internal_notes,
                 tags=source.tags,
                 category=source.category,
                 scheduled_at=scheduled_dt,
+                recurrence_source=source,
             )
 
             # Clone platform posts in bulk, preserving per-platform offsets
@@ -93,9 +127,11 @@ def generate_recurring_posts():
                         PlatformPost(
                             post=new_post,
                             social_account=pp.social_account,
+                            platform_specific_title=pp.platform_specific_title,
                             platform_specific_caption=pp.platform_specific_caption,
                             platform_specific_first_comment=pp.platform_specific_first_comment,
                             platform_specific_media=pp.platform_specific_media,
+                            platform_extra=pp.platform_extra,
                             scheduled_at=pp_scheduled,
                             status="scheduled",
                         )
