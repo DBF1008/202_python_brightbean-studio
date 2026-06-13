@@ -1,0 +1,56 @@
+{% extends "layouts/settings.html" %}
+{% block title %}Team Members - Settings - Brightbean{% endblock %}
+{% block content %}
+<div x-data="{ showInviteModal: false }">
+    <!-- Header -->
+    <div class="flex items-center justify-between mb-6">
+        <h2 class="text-xl font-semibold" style="color: var(--text-primary);">Team Members</h2>
+        {% if is_admin %}
+        <button @click="showInviteModal = true"
+                class="inline-flex items-center gap-1.5 px-4 py-1.5 text-sm font-semibold text-orange-600 bg-orange-50 border border-orange-200 rounded-full hover:bg-orange-100 hover:border-orange-300 active:bg-orange-100 transition-all duration-150 cursor-pointer whitespace-nowrap">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+            Invite Team Member
+        </button>
+        {% endif %}
+    </div>
+
+    <!-- Active Members -->
+    <div style="background: var(--surface-0); border: 1px solid var(--border); border-radius: var(--radius-xl); overflow: hidden;" class="mb-8">
+        <div class="px-6 py-4" style="border-bottom: 1px solid var(--border);">
+            <h3 class="text-sm font-semibold" style="color: var(--text-primary);">Members ({{ members_data|length }})</h3>
+        </div>
+        <div id="members-list">
+            {% for member in members_data %}
+                {% include "members/partials/member_row.html" %}
+            {% empty %}
+            <div class="px-6 py-8 text-center">
+                <p class="text-sm" style="color: var(--text-tertiary);">No team members yet.</p>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <!-- Pending Invitations -->
+    {% if is_admin %}
+    <div style="background: var(--surface-0); border: 1px solid var(--border); border-radius: var(--radius-xl); overflow: hidden;">
+        <div class="px-6 py-4" style="border-bottom: 1px solid var(--border);">
+            <h3 class="text-sm font-semibold" style="color: var(--text-primary);">Pending Invitations</h3>
+        </div>
+        <div id="invitations-list">
+            {% for invite in pending_invites %}
+                {% include "members/partials/invitation_row.html" %}
+            {% empty %}
+            <div class="px-6 py-8 text-center" id="no-invites-placeholder">
+                <p class="text-sm" style="color: var(--text-tertiary);">No pending invitations.</p>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Invite Modal -->
+    {% if is_admin %}
+    {% include "members/partials/invite_modal.html" %}
+    {% endif %}
+</div>
+{% endblock %}

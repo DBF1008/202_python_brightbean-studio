@@ -1,0 +1,394 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Publish - {{ workspace.name }} - Brightbean{% endblock %}
+
+{% block page_header %}
+<div class="flex flex-wrap items-center justify-between gap-3 mb-4 lg:mb-[25px]">
+    <h1 class="text-xl sm:text-2xl font-semibold text-stone-900" style="letter-spacing: -0.01em;">Publish</h1>
+
+    <div class="flex items-center gap-3">
+        <!-- List / Calendar toggle -->
+        <div class="flex items-center bg-stone-50 rounded-full p-0.5" x-data="{ activeMode: '{{ mode|default:'calendar' }}' }">
+            <button class="view-btn{% if mode == 'list' %} active{% endif %}" :class="{ active: activeMode === 'list' }"
+                    @click="activeMode = 'list'"
+                    hx-get="{% url 'calendar:calendar' workspace_id=workspace.id %}?mode=list&tab={{ active_tab|default:'queue' }}&_switch_mode=1"
+                    hx-target="#publish-body"
+                    hx-swap="innerHTML"
+                    hx-push-url="{% url 'calendar:calendar' workspace_id=workspace.id %}?mode=list&tab={{ active_tab|default:'queue' }}">
+                <svg class="w-3.5 h-3.5 inline -mt-px mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 10h16M4 14h16M4 18h16"/></svg>
+                List
+            </button>
+            <button class="view-btn{% if mode == 'calendar' %} active{% endif %}" :class="{ active: activeMode === 'calendar' }"
+                    @click="activeMode = 'calendar'"
+                    hx-get="{% url 'calendar:calendar' workspace_id=workspace.id %}?mode=calendar&view={{ view_type|default:'month' }}&_switch_mode=1"
+                    hx-target="#publish-body"
+                    hx-swap="innerHTML"
+                    hx-push-url="{% url 'calendar:calendar' workspace_id=workspace.id %}?mode=calendar&view={{ view_type|default:'month' }}">
+                <svg class="w-3.5 h-3.5 inline -mt-px mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                Calendar
+            </button>
+        </div>
+
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+    /* Fix parent overflow clipping the calendar */
+    main:has(#publish-body) > div { overflow: visible !important; }
+
+    /* Calendar-specific styles */
+    .cal-day {
+        min-height: 80px;
+        border-right: 1px solid #E7E5E4;
+        border-bottom: 1px solid #E7E5E4;
+        padding: 6px;
+        transition: background 150ms ease;
+        background: white;
+    }
+    @media (min-width: 768px) {
+        .cal-day { min-height: 130px; padding: 8px; }
+    }
+    .cal-day:hover { background: #FAFAF9; }
+    .cal-day.past { background: #F5F5F4; }
+    .cal-day.past:hover { background: #EEEEEC; }
+    .cal-day.today { background: #FFF7ED; }
+    .cal-day.other-month { opacity: 0.4; }
+    .cal-day .day-num {
+        font-size: 13px; font-weight: 600;
+        width: 28px; height: 28px; border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+        margin-bottom: 4px;
+        color: #44403C;
+    }
+    .cal-day.past .day-num { color: #78716C; }
+    .cal-day.today .day-num {
+        background: #F97316; color: white;
+    }
+
+    .post-chip {
+        display: flex; align-items: center; gap: 4px;
+        padding: 3px 6px; border-radius: 6px;
+        font-size: 11px; font-weight: 500;
+        margin-bottom: 2px; cursor: pointer;
+        transition: all 150ms ease;
+        text-decoration: none;
+        max-width: 100%; overflow: hidden;
+    }
+    .post-chip:hover { transform: translateX(1px); }
+    .post-chip .chip-dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+
+    /* Status colors */
+    .status-draft      { background: #F5F5F4; color: #57534E; border: 1px solid #E7E5E4; }
+    .status-draft .chip-dot { background: #A8A29E; }
+    .status-pending_review, .status-pending_client { background: #FFF7ED; color: #C2410C; border: 1px solid #FED7AA; }
+    .status-pending_review .chip-dot, .status-pending_client .chip-dot { background: #F97316; }
+    .status-scheduled  { background: #EFF6FF; color: #1D4ED8; border: 1px solid #BFDBFE; }
+    .status-scheduled .chip-dot { background: #3B82F6; }
+    .status-published  { background: #F0FDF4; color: #15803D; border: 1px solid #BBF7D0; }
+    .status-published .chip-dot { background: #22C55E; }
+    .status-approved   { background: #F0FDFA; color: #0F766E; border: 1px solid #99F6E4; }
+    .status-approved .chip-dot { background: #14B8A6; }
+    .status-changes_requested { background: #FFF7ED; color: #C2410C; border: 1px solid #FED7AA; }
+    .status-changes_requested .chip-dot { background: #F97316; }
+    .status-rejected   { background: #FEF2F2; color: #B91C1C; border: 1px solid #FECACA; }
+    .status-rejected .chip-dot { background: #EF4444; }
+    .status-publishing { background: #EEF2FF; color: #4338CA; border: 1px solid #C7D2FE; }
+    .status-publishing .chip-dot { background: #6366F1; }
+    .status-partially_published { background: #FEFCE8; color: #A16207; border: 1px solid #FEF08A; }
+    .status-partially_published .chip-dot { background: #EAB308; }
+    .status-failed     { background: #FEF2F2; color: #B91C1C; border: 1px solid #FECACA; }
+    .status-failed .chip-dot { background: #EF4444; }
+
+    /* View switcher */
+    .view-btn {
+        padding: 6px 14px; border-radius: 9999px;
+        font-size: 12px; font-weight: 600;
+        color: #78716C; border: none; background: transparent;
+        cursor: pointer; transition: all 150ms ease;
+    }
+    .view-btn:hover { color: #1C1917; background: #F5F5F4; }
+    .view-btn.active { color: #C2410C; background: #FFF7ED; border: 1px solid #FDBA74; box-shadow: 0 1px 2px rgba(194, 65, 12, 0.08); }
+
+    /* Filter chips */
+    .filter-chip {
+        display: inline-flex; align-items: center; gap: 4px;
+        padding: 4px 10px; border-radius: 9999px;
+        font-size: 11px; font-weight: 600;
+        background: #FFF7ED; color: #C2410C;
+        border: 1px solid #FED7AA;
+    }
+    .filter-chip button {
+        width: 14px; height: 14px; border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+        background: transparent; border: none; cursor: pointer;
+        color: #EA580C; font-size: 10px;
+    }
+    .filter-chip button:hover { background: #FFEDD5; }
+
+    /* Publish tab styles */
+    .publish-tab {
+        padding: 10px 16px; border-radius: 0;
+        font-size: 13px; font-weight: 600;
+        color: #78716C; background: transparent;
+        border: none; cursor: pointer;
+        transition: all 150ms ease;
+        position: relative;
+        border-bottom: 2px solid transparent;
+        margin-bottom: -1px;
+    }
+    .publish-tab:hover { color: #1C1917; border-bottom-color: #D6D3D1; }
+    .publish-tab.active { color: #C2410C; border-bottom-color: #F97316; }
+
+    /* Hide scrollbar on filter containers */
+    .cal-filters-scroll::-webkit-scrollbar { display: none; }
+
+    /* Filter dropdowns (shared by list and calendar modes) */
+    .publish-filter-select,
+    .cal-filter-select {
+        padding: 6px 28px 6px 10px; border-radius: 8px;
+        font-size: 12px; font-weight: 600;
+        color: #57534E; background: white;
+        border: 1px solid #E7E5E4;
+        cursor: pointer; transition: all 150ms ease;
+        appearance: none;
+        white-space: nowrap;
+        flex-shrink: 0;
+        background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1L5 5L9 1' stroke='%2378716C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+        background-repeat: no-repeat;
+        background-position: right 8px center;
+    }
+    .publish-filter-select.has-icon,
+    .cal-filter-select.has-icon { padding-left: 28px; }
+    .publish-filter-select:hover,
+    .cal-filter-select:hover { border-color: #D6D3D1; }
+    .publish-filter-select:focus,
+    .cal-filter-select:focus { outline: none; border-color: #F97316; box-shadow: 0 0 0 2px rgba(249,115,22,0.15); }
+    .publish-filter-icon,
+    .cal-filter-icon {
+        position: absolute; left: 9px; top: 50%; transform: translateY(-50%);
+        width: 14px; height: 14px; color: #78716C; pointer-events: none;
+    }
+
+    /* Platform icon badges */
+    .pi-facebook   { background: #1877F2; }
+    .pi-instagram  { background: linear-gradient(135deg, #F58529, #DD2A7B, #8134AF); }
+    .pi-linkedin   { background: #0A66C2; }
+    .pi-linkedin_personal { background: #0A66C2; }
+    .pi-linkedin_company  { background: #0A66C2; }
+    .pi-tiktok     { background: #010101; }
+    .pi-youtube    { background: #FF0000; }
+    .pi-pinterest  { background: #E60023; }
+    .pi-threads    { background: #000000; }
+    .pi-bluesky    { background: #0085FF; }
+    .pi-google_business { background: #4285F4; }
+    .pi-mastodon   { background: #6364FF; }
+
+    /* Add-post button on calendar cells - default (has posts): small top-right */
+    .cal-add-btn {
+        display: none;
+        position: absolute; top: 6px; right: 6px;
+        width: 22px; height: 22px; border-radius: 50%;
+        background: #F97316; color: white; border: none;
+        align-items: center; justify-content: center;
+        cursor: pointer; font-size: 14px; line-height: 1;
+        box-shadow: 0 2px 6px rgba(249,115,22,0.35);
+        transition: transform 100ms ease, background 100ms ease;
+        z-index: 5;
+    }
+    .cal-add-btn:hover { background: #EA580C; transform: scale(1.1); }
+    .cal-add-cell { position: relative; }
+    .cal-add-cell.has-posts:hover .cal-add-btn { display: flex; }
+
+    /* Empty cells: larger centered button */
+    .cal-add-cell:not(.has-posts) .cal-add-btn {
+        top: 50%; left: 50%; right: auto;
+        transform: translate(-50%, -50%);
+        width: 32px; height: 32px;
+        background: #F97316; color: white;
+        box-shadow: 0 2px 6px rgba(249,115,22,0.35);
+        border: none;
+    }
+    .cal-add-cell:not(.has-posts) .cal-add-btn svg { width: 16px; height: 16px; }
+    .cal-add-cell:not(.has-posts):hover .cal-add-btn {
+        display: flex;
+    }
+    .cal-add-cell:not(.has-posts) .cal-add-btn:hover {
+        background: #EA580C;
+        transform: translate(-50%, -50%) scale(1.1);
+        box-shadow: 0 6px 20px rgba(249,115,22,0.35);
+    }
+
+    /* Day/week grids (non-month cells): hide add button entirely when cell has posts */
+    .cal-add-cell.has-posts:not(.cal-day) .cal-add-btn,
+    .cal-add-cell.has-posts:not(.cal-day):hover .cal-add-btn { display: none; }
+
+    /* Inline variant (day/week grid): flow in normal layout, no translate centering */
+    .cal-add-cell:not(.has-posts) .cal-add-btn.cal-add-btn--inline,
+    .cal-add-cell:not(.has-posts) .cal-add-btn.cal-add-btn--inline:hover {
+        top: auto; left: auto; right: auto;
+        transform: none;
+    }
+    .cal-add-cell:not(.has-posts) .cal-add-btn.cal-add-btn--inline:hover {
+        transform: scale(1.1);
+    }
+
+    /* Draggable feedback */
+    .post-chip.dragging { opacity: 0.5; transform: rotate(2deg); }
+
+    @keyframes slideUp {
+        from { opacity: 0; transform: translateY(8px); }
+        to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Play slideUp only on HTMX-swapped tab content, not initial server render */
+    .tab-slide-in { animation: slideUp 200ms cubic-bezier(0.16,1,0.3,1) both; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div id="publish-body" class="flex-1 flex flex-col min-h-0">
+    {% if mode == 'list' %}
+        {% include "calendar/partials/publish_list_shell.html" %}
+    {% else %}
+        {% include "calendar/partials/publish_calendar_shell.html" %}
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script nonce="{{ request.csp_nonce }}">
+function calendarApp() {
+    return {
+        activeView: '{{ view_type }}',
+        draggedPlatformPostId: null,
+        calendarFilters: {
+            status: '{{ active_filters.statuses.0|default:"" }}',
+            channel: '',
+            tag: '{{ active_filters.tags.0|default:"" }}',
+            tz: '{{ display_timezone|default:"UTC" }}',
+        },
+
+        reloadCalendar() {
+            const params = new URLSearchParams();
+            params.set('mode', 'calendar');
+            params.set('view', this.activeView);
+            params.set('date', '{{ target_date|date:"Y-m-d" }}');
+            if (this.calendarFilters.status) params.set('status', this.calendarFilters.status);
+            if (this.calendarFilters.channel) params.set('channel', this.calendarFilters.channel);
+            if (this.calendarFilters.tag) params.set('tag', this.calendarFilters.tag);
+            if (this.calendarFilters.tz) params.set('tz', this.calendarFilters.tz);
+            {% if show_holidays %}params.set('holidays', '1');{% endif %}
+            const url = '{% url "calendar:calendar" workspace_id=workspace.id %}?' + params.toString();
+            htmx.ajax('GET', url, {target: '#calendar-content', swap: 'innerHTML'});
+        },
+
+        startDrag(event, platformPostId) {
+            this.draggedPlatformPostId = platformPostId;
+            event.dataTransfer.effectAllowed = 'move';
+            event.target.classList.add('dragging');
+        },
+
+        endDrag(event) {
+            event.target.classList.remove('dragging');
+            this.draggedPlatformPostId = null;
+        },
+
+        allowDrop(event) {
+            event.preventDefault();
+            event.dataTransfer.dropEffect = 'move';
+        },
+
+        dropOnSlot(event, dateStr, hour) {
+            event.preventDefault();
+            const platformPostId = this.draggedPlatformPostId;
+            if (!platformPostId) return;
+
+            const chip = document.querySelector(
+                `[data-platform-post-id="${platformPostId}"]`
+            );
+            const targetCell = event.currentTarget;
+            if (!chip || !targetCell) return;
+
+            const originalParent = chip.parentNode;
+            const originalNextSibling = chip.nextSibling;
+
+            // Optimistically move the chip into the target slot so the user
+            // sees the reschedule immediately, with no full grid reload.
+            if (originalParent !== targetCell || originalNextSibling !== null) {
+                targetCell.appendChild(chip);
+            }
+            this.draggedPlatformPostId = null;
+
+            const newDatetime = dateStr + 'T' + String(hour).padStart(2, '0') + ':00:00';
+
+            const csrfToken =
+                (document.querySelector('[name=csrfmiddlewaretoken]') || {}).value ||
+                (document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/) || [])[1] ||
+                '';
+
+            const rollback = () => {
+                originalParent.insertBefore(chip, originalNextSibling);
+            };
+
+            fetch('{% url "calendar:reschedule" workspace_id=workspace.id %}', {
+                method: 'POST',
+                headers: {
+                    'X-CSRFToken': csrfToken,
+                    'X-Requested-With': 'XMLHttpRequest',
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: new URLSearchParams({
+                    platform_post_id: platformPostId,
+                    new_datetime: newDatetime,
+                }),
+            }).then((res) => {
+                if (!res.ok) {
+                    rollback();
+                    console.error('Reschedule failed', res.status);
+                }
+            }).catch((err) => {
+                rollback();
+                console.error('Reschedule failed', err);
+            });
+        }
+    };
+}
+
+function publishList() {
+    return {
+        activeTab: '{{ active_tab|default:"queue" }}',
+        activeChannel: '',
+        activeTag: '',
+        displayTimezone: '{{ display_timezone|default:"UTC" }}',
+
+        tabUrls: {
+            queue: '{% url "calendar:publish_tab_queue" workspace_id=workspace.id %}',
+            drafts: '{% url "calendar:publish_tab_drafts" workspace_id=workspace.id %}',
+            approvals: '{% url "calendar:publish_tab_approvals" workspace_id=workspace.id %}',
+            sent: '{% url "calendar:publish_tab_sent" workspace_id=workspace.id %}',
+        },
+
+        init() {
+            window.addEventListener('post-deleted', () => this.reloadTab());
+        },
+
+        switchTab(tab) {
+            this.activeTab = tab;
+            this.reloadTab();
+        },
+
+        reloadTab() {
+            const params = new URLSearchParams();
+            if (this.activeChannel) params.set('channel', this.activeChannel);
+            if (this.activeTag) params.set('tag', this.activeTag);
+            if (this.displayTimezone) params.set('tz', this.displayTimezone);
+            const url = this.tabUrls[this.activeTab] + '?' + params.toString();
+            htmx.ajax('GET', url, {target: '#tab-content', swap: 'innerHTML'});
+        }
+    };
+}
+</script>
+{% endblock %}

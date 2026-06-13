@@ -1,0 +1,37 @@
+<!-- Workspace Assignment Form (loaded via HTMX into modal) -->
+<form hx-post="{% url 'members:manage_workspaces' membership_id=membership.id %}"
+      hx-target="#member-{{ membership.id }}"
+      hx-swap="outerHTML">
+    {% csrf_token %}
+
+    <div class="space-y-2 max-h-64 overflow-y-auto mb-4">
+        {% for wd in workspace_data %}
+        <div class="flex items-center gap-3 py-2 px-3 rounded-lg" style="background: var(--neutral-50);">
+            <input type="checkbox" name="ws_{{ wd.workspace.id }}" value="1"
+                   id="assign-ws-{{ wd.workspace.id }}"
+                   {% if wd.assigned %}checked{% endif %}
+                   class="accent-orange-500 cursor-pointer">
+            <label for="assign-ws-{{ wd.workspace.id }}" class="flex-1 text-sm cursor-pointer" style="color: var(--text-primary);">
+                {{ wd.workspace.name }}
+            </label>
+            <select name="ws_role_{{ wd.workspace.id }}"
+                    class="text-xs px-2 py-1 rounded border outline-none"
+                    style="border-color: var(--border); background: var(--surface-0); color: var(--text-primary);">
+                {% for value, label in workspace_role_choices %}
+                <option value="{{ value }}" {% if value == wd.current_role %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        {% empty %}
+        <p class="text-sm" style="color: var(--text-tertiary);">No workspaces available.</p>
+        {% endfor %}
+    </div>
+
+    <div class="flex justify-end">
+        <button type="submit"
+                class="btn-opacity px-5 py-2 text-sm font-medium rounded-full cursor-pointer transition-colors"
+                style="background: var(--primary); color: white;">
+            Save Assignments
+        </button>
+    </div>
+</form>

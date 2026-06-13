@@ -1,0 +1,6 @@
+# BrightBean Studio code owners.
+# Every pull request automatically requests a review from the listed owners.
+# Syntax reference: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Default owner for everything in the repo.
+*                                   @JanSchm

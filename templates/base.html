@@ -1,0 +1,1349 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en" style="{% block html_style %}{% endblock %}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Brightbean{% endblock %}</title>
+    <link rel="icon" href="{% static 'favicon/favicon.ico' %}" sizes="any">
+    <link rel="icon" type="image/svg+xml" href="{% static 'favicon/favicon.svg' %}">
+    <link rel="icon" type="image/png" sizes="96x96" href="{% static 'favicon/favicon-96x96.png' %}">
+    <link rel="apple-touch-icon" sizes="180x180" href="{% static 'favicon/apple-touch-icon.png' %}">
+    <link rel="manifest" href="{% static 'favicon/site.webmanifest' %}">
+    <link rel="stylesheet" href="{% static 'css/dist/styles.css' %}">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.css">
+    <script nonce="{{ request.csp_nonce }}">
+        // Set sidebar state class on <html> before first paint to prevent flash
+        if (localStorage.getItem('sidebarCollapsed') === 'true') {
+            document.documentElement.classList.add('sidebar-is-collapsed');
+        }
+    </script>
+    <style>
+        [x-cloak] { display: none !important; }
+        /* Initial sidebar width - applied before Alpine loads */
+        .sidebar-initial { width: 240px; }
+        html.sidebar-is-collapsed .sidebar-initial { width: 60px; }
+        html.sidebar-is-collapsed .sidebar-initial .sidebar-nav-item { justify-content: center; padding: 8px; gap: 0; }
+        html.sidebar-is-collapsed .sidebar-initial .sidebar-nav-label,
+        html.sidebar-is-collapsed .sidebar-initial .sidebar-section-label,
+        html.sidebar-is-collapsed .sidebar-initial .sidebar-section-label-wrap,
+        html.sidebar-is-collapsed .sidebar-initial .sidebar-badge { display: none; }
+        html.sidebar-is-collapsed .sidebar-initial .sidebar-new-label,
+        html.sidebar-is-collapsed .sidebar-initial .sidebar-connect-channels { display: none; }
+        /* Collapsed child overrides before Alpine */
+        html.sidebar-is-collapsed .sidebar-initial .sidebar-ws-btn { justify-content: center; padding-left: 0; padding-right: 0; gap: 0; }
+        html.sidebar-is-collapsed .sidebar-initial .sidebar-new-wrap { padding-left: 0.5rem; padding-right: 0.5rem; }
+        html.sidebar-is-collapsed .sidebar-initial .sidebar-nav { padding-left: 0.5rem; padding-right: 0.5rem; }
+        html.sidebar-is-collapsed .sidebar-initial .sidebar-org-footer { padding: 0.5rem; }
+        html.sidebar-is-collapsed .sidebar-initial .sidebar-org-expanded { display: none; }
+        html.sidebar-is-collapsed .sidebar-initial .sidebar-org-collapsed { display: flex !important; }
+
+        /* Mobile: hide sidebar off-screen before Alpine loads */
+        @media (max-width: 1023px) {
+            .sidebar-initial {
+                position: fixed;
+                top: 0; bottom: 0; left: 0;
+                transform: translateX(-100%);
+                z-index: 40;
+                width: 240px !important;
+            }
+            /* On mobile, never show collapsed state pre-Alpine */
+            html.sidebar-is-collapsed .sidebar-initial { width: 240px !important; }
+        }
+
+        /* Idea modal styles (shared with create_landing) */
+        .idea-modal-overlay {
+            position: fixed; inset: 0;
+            background: rgba(0,0,0,0.3);
+            display: flex; align-items: center; justify-content: center;
+            z-index: 200;
+        }
+        .idea-modal {
+            background: white; border-radius: 16px; width: 100%; max-width: 640px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+            display: flex; flex-direction: column; max-height: calc(100vh - 80px); position: relative;
+            margin: 0 1rem;
+        }
+        @media (max-width: 640px) {
+            .idea-modal {
+                margin: 0; border-radius: 0; max-height: 100vh; height: 100vh;
+            }
+            .idea-modal-overlay {
+                align-items: stretch;
+            }
+        }
+        .idea-modal-close {
+            position: absolute; top: 16px; right: 16px; width: 28px; height: 28px;
+            display: flex; align-items: center; justify-content: center;
+            border: none; background: none; border-radius: 6px;
+            color: var(--text-tertiary); cursor: pointer; transition: color 150ms, background 150ms; z-index: 1;
+        }
+        .idea-modal-close:hover { color: var(--text-primary); background: var(--neutral-100); }
+        .idea-modal-header {
+            display: flex; align-items: center; justify-content: space-between; padding: 20px 50px 16px 24px;
+        }
+        .idea-modal-body { flex: 1; overflow-y: auto; padding: 0 24px 16px; }
+        .idea-modal-footer {
+            padding: 16px 24px; border-top: 1px solid var(--border);
+            display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+        }
+        .idea-modal-body input.idea-title-input {
+            width: 100%; font-size: 1.25rem; font-weight: 700; color: var(--text-primary);
+            border: none; outline: none; padding: 0; margin-bottom: 12px; background: transparent;
+        }
+        .idea-modal-body input.idea-title-input::placeholder { color: var(--neutral-300); }
+        .idea-modal-body textarea.idea-desc-input {
+            width: 100%; min-height: 160px; font-size: 0.875rem; color: var(--text-primary);
+            border: none; outline: none; padding: 0; resize: none; background: transparent; line-height: 1.7;
+        }
+        .idea-modal-body textarea.idea-desc-input::placeholder { color: var(--neutral-300); }
+        .idea-pill-btn {
+            display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px;
+            border: 1px solid var(--border); border-radius: 9999px; font-size: 0.8125rem;
+            font-weight: 500; color: var(--text-primary); background: var(--surface-0);
+            cursor: pointer; transition: background 150ms; white-space: nowrap;
+        }
+        .idea-pill-btn:hover { background: var(--neutral-50); }
+        .idea-pill-dropdown {
+            position: absolute; top: calc(100% + 6px); right: 0; background: white;
+            border-radius: 10px; box-shadow: 0 8px 30px rgba(0,0,0,0.12); border: 1px solid var(--border);
+            min-width: 180px; max-height: 240px; overflow-y: auto; z-index: 210; padding: 4px;
+        }
+        .idea-pill-dropdown label, .idea-pill-dropdown button {
+            display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px;
+            font-size: 0.8125rem; border-radius: 6px; cursor: pointer; transition: background 100ms;
+            border: none; background: none; color: var(--text-primary); text-align: left;
+        }
+        .idea-pill-dropdown label:hover, .idea-pill-dropdown button:hover { background: var(--neutral-50); }
+        .idea-media-zone {
+            border: 2px dashed var(--border); border-radius: 12px; padding: 24px;
+            display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+            color: var(--text-tertiary); font-size: 0.8125rem; max-width: 150px; margin-top: 16px;
+            cursor: pointer;
+            transition: border-color 150ms, background 150ms;
+        }
+        .idea-media-zone.drag-over { border-color: var(--primary); background: rgba(var(--primary-rgb, 249, 115, 22), 0.05); }
+        .idea-media-strip-layout {
+            margin-top: 16px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            align-items: flex-start;
+        }
+        .idea-media-zone.idea-media-zone-tile {
+            margin-top: 0;
+            width: 130px;
+            max-width: 130px;
+            min-height: 130px;
+            height: 130px;
+            padding: 14px 10px;
+        }
+        .idea-media-existing-card {
+            position: relative;
+            border-radius: 12px;
+            overflow: hidden;
+            border: 1px solid var(--border);
+            width: 130px;
+            height: 130px;
+            background: var(--neutral-100);
+        }
+        .idea-media-existing-card img,
+        .idea-media-existing-card video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+        .idea-media-existing-card .remove-btn {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            width: 38px;
+            height: 38px;
+            border: 2px solid #fff;
+            border-radius: 9999px;
+            background: rgba(38, 38, 38, 0.78);
+            color: #fff;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0;
+            transition: background 150ms;
+        }
+        .idea-media-existing-card .remove-btn:hover { background: rgba(23, 23, 23, 0.9); }
+        @media (max-width: 640px) {
+            .idea-media-strip-layout {
+                gap: 10px;
+            }
+        }
+        .idea-selected-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
+        .idea-selected-tags .idea-tag-chip {
+            display: inline-flex; align-items: center; gap: 3px; padding: 2px 8px; border-radius: 9999px;
+            font-size: 0.6875rem; font-weight: 600;
+            background: var(--primary-soft, #FFF7ED); color: var(--primary, #C2410C); border: 1px solid var(--primary-muted, #FED7AA);
+        }
+        .idea-selected-tags .idea-tag-chip button {
+            display: flex; align-items: center; justify-content: center;
+            width: 12px; height: 12px; border: none; background: none; cursor: pointer; color: inherit; padding: 0;
+        }
+        .emoji-picker-popup {
+            position: absolute; bottom: calc(100% + 8px); left: 0; background: white;
+            border-radius: 12px; box-shadow: 0 8px 30px rgba(0,0,0,0.15); border: 1px solid var(--border);
+            width: 280px; z-index: 220; overflow: hidden;
+        }
+        .emoji-picker-search { padding: 8px 8px 4px; }
+        .emoji-picker-grid {
+            display: grid; grid-template-columns: repeat(8, 1fr); gap: 2px;
+            padding: 4px 8px 8px; max-height: 200px; overflow-y: auto;
+        }
+        .emoji-picker-item {
+            width: 30px; height: 30px; display: flex; align-items: center; justify-content: center;
+            font-size: 18px; border: none; background: none; border-radius: 6px; cursor: pointer; transition: background 100ms;
+        }
+        .emoji-picker-item:hover { background: var(--neutral-100); }
+    </style>
+    {% block extra_head %}{% endblock %}
+</head>
+<body class="text-gray-900 min-h-screen" style="background: var(--surface-page);">
+    {% csrf_token %}
+    <script nonce="{{ request.csp_nonce }}">
+        document.body.addEventListener('htmx:configRequest', function(event) {
+            event.detail.headers['X-CSRFToken'] = document.querySelector('[name=csrfmiddlewaretoken]').value;
+        });
+    </script>
+    {% if user.is_authenticated %}
+    <div class="flex h-screen overflow-hidden"
+         style="background: var(--surface-page);"
+         x-data="{ sidebarCollapsed: localStorage.getItem('sidebarCollapsed') === 'true', mobileMenuOpen: false }"
+         x-effect="localStorage.setItem('sidebarCollapsed', sidebarCollapsed)"
+         @keydown.escape.window="mobileMenuOpen = false">
+
+        <!-- Mobile backdrop overlay -->
+        <div x-show="mobileMenuOpen" x-cloak
+             x-transition:enter="transition ease-out duration-200"
+             x-transition:enter-start="opacity-0"
+             x-transition:enter-end="opacity-100"
+             x-transition:leave="transition ease-in duration-150"
+             x-transition:leave-start="opacity-100"
+             x-transition:leave-end="opacity-0"
+             @click="mobileMenuOpen = false"
+             class="fixed inset-0 bg-black/30 z-30 lg:hidden"></div>
+
+        <!-- Sidebar -->
+        <aside class="flex flex-col flex-shrink-0 sidebar-initial
+                      fixed inset-y-0 left-0 z-40 w-60 bg-white
+                      transition-transform duration-200
+                      lg:relative lg:z-auto lg:translate-x-0 lg:bg-transparent"
+               :class="[
+                   sidebarCollapsed ? 'lg:w-[60px] sidebar-collapsed' : 'lg:w-60',
+                   mobileMenuOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0'
+               ]"
+               x-init="$el.classList.remove('sidebar-initial'); document.documentElement.classList.remove('sidebar-is-collapsed'); $nextTick(() => $el.classList.add('transition-all', 'duration-200'))"
+               @click="if (window.innerWidth < 1024 && $event.target.closest('a')) { mobileMenuOpen = false }">
+
+            <!-- Workspace switcher (top of sidebar) -->
+            <div class="relative border-b border-stone-100" x-data="{ wsOpen: false }">
+                <button @click="wsOpen = !wsOpen"
+                        class="sidebar-ws-btn w-full flex items-center gap-2.5 px-4 py-3.5 text-left hover:bg-black/[0.04] transition-colors cursor-pointer rounded-br-lg"
+                        :class="sidebarCollapsed ? 'justify-center px-0' : 'gap-2.5 px-4'">
+                    {% with current_ws=request.workspace %}
+                    {% if current_ws %}
+                    {% if current_ws.icon %}
+                    <img src="{{ current_ws.icon.url }}" alt="" class="sidebar-logo-mark flex-shrink-0 object-cover">
+                    {% else %}
+                    <div class="sidebar-logo-mark flex-shrink-0">{{ current_ws.name|make_list|first|upper }}</div>
+                    {% endif %}
+                    <span class="flex-1 font-bold text-[0.9375rem] tracking-tight text-stone-900 truncate" x-show="!sidebarCollapsed" x-cloak>{{ current_ws.name }}</span>
+                    {% elif sidebar_workspaces %}
+                    {% if sidebar_workspaces.0.icon %}
+                    <img src="{{ sidebar_workspaces.0.icon.url }}" alt="" class="sidebar-logo-mark flex-shrink-0 object-cover">
+                    {% else %}
+                    <div class="sidebar-logo-mark flex-shrink-0">{{ sidebar_workspaces.0.name|make_list|first|upper }}</div>
+                    {% endif %}
+                    <span class="flex-1 font-bold text-[0.9375rem] tracking-tight text-stone-900 truncate" x-show="!sidebarCollapsed" x-cloak>{{ sidebar_workspaces.0.name }}</span>
+                    {% else %}
+                    <div class="sidebar-logo-mark flex-shrink-0">P</div>
+                    <span class="flex-1 font-bold text-[0.9375rem] tracking-tight text-stone-900 truncate" x-show="!sidebarCollapsed" x-cloak>Brightbean</span>
+                    {% endif %}
+                    {% endwith %}
+                    <svg class="w-4 h-4 text-stone-400 flex-shrink-0 transition-transform" :class="wsOpen && 'rotate-180'" x-show="!sidebarCollapsed" x-cloak fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                </button>
+
+                <!-- Workspace dropdown -->
+                <div x-show="wsOpen" @click.away="wsOpen = false" x-cloak
+                     x-transition:enter="transition ease-out duration-100"
+                     x-transition:enter-start="opacity-0 -translate-y-1"
+                     x-transition:enter-end="opacity-100 translate-y-0"
+                     x-transition:leave="transition ease-in duration-75"
+                     x-transition:leave-start="opacity-100"
+                     x-transition:leave-end="opacity-0"
+                     class="absolute left-2 right-2 top-full mt-1 bg-white rounded-xl shadow-lg ring-1 ring-stone-200 py-1 z-50">
+                    {% for ws in sidebar_workspaces %}
+                    <a href="{% url 'calendar:calendar' workspace_id=ws.id %}"
+                       class="flex items-center gap-2.5 px-3 py-2 text-sm rounded-md hover:bg-black/[0.04] transition-colors {% if request.workspace and ws.id == request.workspace.id %}bg-stone-50 font-semibold text-stone-900{% else %}text-stone-700{% endif %}">
+                        {% if ws.icon %}
+                        <img src="{{ ws.icon.url }}" alt="" class="w-7 h-7 rounded-md object-cover flex-shrink-0">
+                        {% else %}
+                        <div class="w-7 h-7 rounded-md flex items-center justify-center text-white text-[11px] font-bold flex-shrink-0"
+                             style="background: var(--primary);">
+                            {{ ws.name|make_list|first|upper }}
+                        </div>
+                        {% endif %}
+                        <span class="truncate">{{ ws.name }}</span>
+                        {% if request.workspace and ws.id == request.workspace.id %}
+                        <svg class="w-4 h-4 text-stone-400 ml-auto flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                        {% endif %}
+                    </a>
+                    {% empty %}
+                    <p class="px-3 py-2 text-sm text-stone-400">No workspaces</p>
+                    {% endfor %}
+                    {% if can_create_workspace %}
+                    <div class="border-t border-stone-100 mt-1 pt-1">
+                        <button @click="wsOpen = false; $dispatch('open-create-ws')"
+                                class="flex items-center gap-2.5 px-3 py-2 text-sm text-stone-600 rounded-md hover:bg-black/[0.04] transition-colors w-full cursor-pointer">
+                            <div class="w-7 h-7 rounded-md flex items-center justify-center border border-dashed border-stone-300 flex-shrink-0">
+                                <svg class="w-3.5 h-3.5 text-stone-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+                            </div>
+                            <span>Create workspace</span>
+                        </button>
+                    </div>
+                    {% endif %}
+                    {% if request.workspace %}
+                    <div class="border-t border-stone-100 mt-1 pt-1">
+                        <a href="{% url 'workspaces:settings' workspace_id=request.workspace.id %}"
+                           class="flex items-center gap-2.5 px-3 py-2 text-sm text-stone-600 rounded-md hover:bg-black/[0.04] transition-colors w-full cursor-pointer">
+                            <div class="w-7 h-7 rounded-md flex items-center justify-center flex-shrink-0">
+                                <svg class="w-4 h-4 text-stone-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.32 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+                            </div>
+                            <span>Workspace settings</span>
+                        </a>
+                    </div>
+                    {% endif %}
+                </div>
+
+            </div>
+
+            <!-- + New CTA -->
+            {% if request.workspace %}
+            <div class="sidebar-new-wrap px-3 pt-2 pb-1" :class="sidebarCollapsed && 'px-2'"
+                 x-data="sidebarNewMenu()">
+                <div class="relative">
+                    <button @click="newMenuOpen = !newMenuOpen"
+                            class="btn-brand w-full flex items-center justify-center gap-1.5 text-sm py-2 cursor-pointer"
+                            :style="sidebarCollapsed ? 'padding-left:1.15rem;padding-right:1.15rem' : ''">
+                        <svg class="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+                        <span class="sidebar-new-label" x-show="!sidebarCollapsed">New</span>
+                    </button>
+
+                    <!-- Dropdown -->
+                    <div x-show="newMenuOpen" x-cloak @click.away="newMenuOpen = false"
+                         x-transition:enter="transition ease-out duration-100"
+                         x-transition:enter-start="opacity-0 scale-95"
+                         x-transition:enter-end="opacity-100 scale-100"
+                         x-transition:leave="transition ease-in duration-75"
+                         x-transition:leave-start="opacity-100 scale-100"
+                         x-transition:leave-end="opacity-0 scale-95"
+                         class="absolute left-0 right-0 top-full mt-2 bg-white rounded-xl shadow-lg ring-1 ring-stone-200 z-50 overflow-hidden py-1.5 px-1.5">
+                        <a href="{% url 'composer:compose' workspace_id=request.workspace.id %}"
+                           class="flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-stone-50 transition-colors">
+                            <div class="w-10 h-10 rounded-xl bg-blue-50 flex items-center justify-center flex-shrink-0">
+                                <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                            </div>
+                            <div>
+                                <div class="text-sm font-semibold text-stone-800">Post</div>
+                                <div class="text-xs text-stone-500">Publish content to a channel</div>
+                            </div>
+                        </a>
+                        <button type="button" @click="openCreateModal()"
+                                class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-stone-50 transition-colors cursor-pointer">
+                            <div class="w-10 h-10 rounded-xl bg-green-50 flex items-center justify-center flex-shrink-0">
+                                <svg class="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+                            </div>
+                            <div class="text-left">
+                                <div class="text-sm font-semibold text-stone-800">Idea</div>
+                                <div class="text-xs text-stone-500">Capture a content idea</div>
+                            </div>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Create Idea Modal -->
+                <template x-teleport="body">
+                    <div x-show="showCreateModal" x-cloak
+                         class="idea-modal-overlay"
+                         @click.self="closeCreateModal()"
+                         @keydown.escape.window="closeCreateModal()">
+                        <div class="idea-modal" @click.stop>
+                            <button type="button" class="idea-modal-close" @click="closeCreateModal()" title="Close">
+                                <svg width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                            </button>
+                            <form action="{% url 'composer:idea_create' workspace_id=request.workspace.id %}"
+                                  method="post"
+                                  enctype="multipart/form-data"
+                                  @submit.prevent="submitCreateIdea($event)">
+                                {% csrf_token %}
+                                <input type="hidden" name="group" :value="createSelectedGroup">
+                                <input type="hidden" name="tags" :value="createSelectedTags.join(',')">
+                                <input type="hidden" name="media_asset_ids" :value="createMediaAssetIdsCsv()">
+                                <input type="hidden" name="media_asset_id" :value="createPrimaryMediaAssetId()">
+
+                                <!-- Header -->
+                                <div class="idea-modal-header">
+                                    <h2 class="text-lg font-semibold" style="color: var(--text-primary);">Create Idea</h2>
+                                    <div class="flex items-center gap-2">
+                                        <!-- Column selector dropdown -->
+                                        <div class="relative" @click.away="createGroupDropdownOpen = false">
+                                            <button type="button" class="idea-pill-btn" @click="createGroupDropdownOpen = !createGroupDropdownOpen; createTagDropdownOpen = false">
+                                                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+                                                <span x-text="createGroupLabel()"></span>
+                                                <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>
+                                            </button>
+                                            <div x-show="createGroupDropdownOpen" x-cloak x-transition class="idea-pill-dropdown">
+                                                {% for col in sidebar_idea_columns %}
+                                                <button type="button"
+                                                        @click="createSelectedGroup = '{{ col.id }}'; createGroupDropdownOpen = false"
+                                                        :class="createSelectedGroup === '{{ col.id }}' && 'font-semibold'">
+                                                    <span>{{ col.label }}</span>
+                                                    <svg x-show="createSelectedGroup === '{{ col.id }}'" width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" class="ml-auto" style="color: var(--primary);"><polyline points="20 6 9 17 4 12"/></svg>
+                                                </button>
+                                                {% endfor %}
+                                            </div>
+                                        </div>
+
+                                        <!-- Tags dropdown -->
+                                        <div class="relative" @click.away="createTagDropdownOpen = false">
+                                            <button type="button" class="idea-pill-btn" @click="createTagDropdownOpen = !createTagDropdownOpen; createGroupDropdownOpen = false; if(createTagDropdownOpen) $nextTick(() => $refs.sidebarCreateTagSearchInput.focus())">
+                                                <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+                                                <span>Tags</span>
+                                                <span x-show="createSelectedTags.length" class="inline-flex items-center justify-center w-4 h-4 rounded-full text-[10px] font-bold text-white" style="background: var(--primary);" x-text="createSelectedTags.length"></span>
+                                                <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path d="M6 9l6 6 6-6"/></svg>
+                                            </button>
+                                            <div x-show="createTagDropdownOpen" x-cloak x-transition class="idea-pill-dropdown">
+                                                <div style="padding: 4px 6px; border-bottom: 1px solid var(--border);">
+                                                    <input type="text" x-ref="sidebarCreateTagSearchInput" x-model="createTagSearch"
+                                                           @keydown.enter.prevent="if (createTagSearch.trim() && !filteredCreateTags.includes(createTagSearch.trim())) { persistAndToggleCreateTag(createTagSearch.trim()); } else if (filteredCreateTags.length === 1) { toggleCreateTag(filteredCreateTags[0]); createTagSearch = ''; }"
+                                                           class="w-full text-xs px-2 py-1.5 rounded border outline-none"
+                                                           style="border-color: var(--border);"
+                                                           placeholder="Search or create tag...">
+                                                </div>
+                                                <template x-for="tag in filteredCreateTags" :key="tag">
+                                                    <label>
+                                                        <input type="checkbox" class="rounded accent-orange-500"
+                                                               :checked="createSelectedTags.includes(tag)"
+                                                               @change="toggleCreateTag(tag)">
+                                                        <span x-text="tag"></span>
+                                                    </label>
+                                                </template>
+                                                <template x-if="!createTagSearch.trim() && !allTags.length">
+                                                    <div class="px-3 py-2 text-xs" style="color: var(--text-tertiary);">No tags yet. Type to create one.</div>
+                                                </template>
+                                                <template x-if="createTagSearch.trim() && !filteredCreateTags.includes(createTagSearch.trim())">
+                                                    <div class="border-t" style="border-color: var(--border); margin-top: 2px; padding-top: 2px;">
+                                                        <button type="button" @click="persistAndToggleCreateTag(createTagSearch.trim())"
+                                                                style="color: var(--primary);">
+                                                            <svg width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+                                                            Create "<span x-text="createTagSearch.trim()"></span>"
+                                                        </button>
+                                                    </div>
+                                                </template>
+                                                <div class="border-t border-stone-100 px-1 py-1">
+                                                    <button type="button" @click="createTagDropdownOpen = false; showCreateTagModal = true; newTagName = createTagSearch; createTagSearch = ''; $nextTick(() => $refs.sidebarNewTagNameInput.focus())"
+                                                            class="flex items-center gap-2 w-full px-2.5 py-1.5 text-sm text-stone-600 hover:bg-stone-50 rounded-md cursor-pointer transition-colors">
+                                                        <svg class="w-3.5 h-3.5 text-orange-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4"/></svg>
+                                                        Create new tag
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Selected tags chips -->
+                                <template x-if="createSelectedTags.length > 0">
+                                    <div class="idea-selected-tags" style="padding: 0 24px 8px;">
+                                        <template x-for="tag in createSelectedTags" :key="tag">
+                                            <span class="idea-tag-chip">
+                                                <span x-text="tag"></span>
+                                                <button type="button" @click="toggleCreateTag(tag)">
+                                                    <svg width="8" height="8" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="3"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                                                </button>
+                                            </span>
+                                        </template>
+                                    </div>
+                                </template>
+
+                                <!-- Body -->
+                                <div class="idea-modal-body" @click="createGroupDropdownOpen = false; createTagDropdownOpen = false">
+                                    <input type="text" name="title" required class="idea-title-input" placeholder="Give your idea a title">
+                                    <textarea name="description" class="idea-desc-input" placeholder="Let it flow... or"></textarea>
+                                    <input type="file" name="media" x-ref="sidebarIdeaFileInput" accept="image/*,video/*,.gif" style="display:none" multiple
+                                           @change="_handleFileSelect($event)">
+
+                                    <div class="idea-media-strip-layout">
+                                        <template x-for="(media, index) in createMediaAssets" :key="media.asset_id + '-' + index">
+                                            <div class="idea-media-existing-card">
+                                                <template x-if="media.media_type === 'video'">
+                                                    <video :src="media.url" muted playsinline preload="metadata"></video>
+                                                </template>
+                                                <template x-if="media.media_type !== 'video'">
+                                                    <img :src="media.url" alt="Preview">
+                                                </template>
+                                                <button type="button" class="remove-btn" @click="_removeCreateMedia(index)" title="Remove">
+                                                    <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                                                </button>
+                                            </div>
+                                        </template>
+                                        <div class="idea-media-zone"
+                                             :class="{ 'idea-media-zone-tile': true, 'drag-over': _mediaDragOver }"
+                                             @click="$refs.sidebarIdeaFileInput.click()"
+                                             @dragover.prevent="_mediaDragOver = true"
+                                             @dragleave.prevent="_mediaDragOver = false"
+                                             @drop.prevent="_mediaDragOver = false; _handleMediaDrop($event)">
+                                            <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                                            <span x-show="!createMediaAssets.length">Drag &amp; drop</span>
+                                            <span x-show="createMediaAssets.length">Add another file</span>
+                                            <span>or <strong style="color: var(--primary); cursor: pointer;">select a file</strong></span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Footer -->
+                                <div class="idea-modal-footer" @click="createGroupDropdownOpen = false; createTagDropdownOpen = false">
+                                    <span style="margin-right: auto; display: flex; align-items: center; gap: 8px; color: var(--text-tertiary);">
+                                        <span style="width: 1px; height: 20px; background: var(--border);"></span>
+                                        <div class="relative">
+                                            <button type="button" @click.stop="emojiPickerOpen = !emojiPickerOpen" class="p-1 rounded hover:bg-stone-100 transition-colors cursor-pointer" title="Emoji" style="color: var(--text-tertiary);">
+                                                <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
+                                            </button>
+                                            <div x-show="emojiPickerOpen" x-cloak @click.away="emojiPickerOpen = false"
+                                                 x-transition:enter="transition ease-out duration-100"
+                                                 x-transition:enter-start="opacity-0 scale-95"
+                                                 x-transition:enter-end="opacity-100 scale-100"
+                                                 class="emoji-picker-popup">
+                                                <div class="emoji-picker-search">
+                                                    <input type="text" placeholder="Search emoji..." x-model="_emojiSearch"
+                                                           class="w-full px-2 py-1.5 text-xs rounded border outline-none"
+                                                           style="border-color: var(--border);"
+                                                           @click.stop>
+                                                </div>
+                                                <div class="emoji-picker-grid">
+                                                    <template x-for="emoji in _filteredEmojis()" :key="emoji.e">
+                                                        <button type="button"
+                                                                class="emoji-picker-item"
+                                                                @click.stop="_insertEmoji(emoji.e); emojiPickerOpen = false"
+                                                                x-text="emoji.e"
+                                                                :title="emoji.n">
+                                                        </button>
+                                                    </template>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <span style="width: 1px; height: 20px; background: var(--border);"></span>
+                                    </span>
+                                    <button type="button" @click="closeCreateModal()"
+                                            class="btn-neutral px-5 py-2 text-sm font-medium rounded-full transition-colors cursor-pointer"
+                                            style="background: var(--neutral-100); color: var(--text-primary);">
+                                        Cancel
+                                    </button>
+                                    <button type="submit"
+                                            :disabled="createMediaUploadCount > 0 || isCreateSaving"
+                                            :class="(createMediaUploadCount > 0 || isCreateSaving) && 'opacity-50 cursor-not-allowed'"
+                                            class="btn-neutral px-5 py-2 text-sm font-medium rounded-full transition-colors cursor-pointer"
+                                            style="background: var(--neutral-100); color: var(--text-primary);">
+                                        Save Idea
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                    <div x-show="showCreateTagModal" x-cloak class="fixed inset-0 z-[220] flex items-center justify-center" @keydown.escape.window="closeCreateTagModal()">
+                        <div class="fixed inset-0 bg-black/30" @click="closeCreateTagModal()"></div>
+                        <div class="relative bg-white rounded-2xl shadow-xl w-full max-w-sm mx-4 p-6" @click.stop>
+                            <h3 class="text-base font-semibold text-stone-800 mb-4">Create new tag</h3>
+                            <input type="text" x-ref="sidebarNewTagNameInput" x-model="newTagName"
+                                   @keydown.enter.prevent="createTagFromModal()"
+                                   class="w-full text-sm px-3 py-2.5 rounded-xl border border-stone-200 outline-none focus:border-orange-400 focus:ring-2 focus:ring-orange-100 transition-all"
+                                   placeholder="Tag name...">
+                            <div class="flex justify-end gap-2 mt-4">
+                                <button type="button" @click="closeCreateTagModal()"
+                                        class="px-4 py-2 text-sm font-medium text-stone-600 hover:bg-stone-100 rounded-lg cursor-pointer transition-colors">
+                                    Cancel
+                                </button>
+                                <button type="button"
+                                        @click="createTagFromModal()"
+                                        class="px-4 py-2 text-sm font-semibold text-white rounded-lg transition-colors"
+                                        style="background: var(--primary);"
+                                        :class="newTagName.trim() ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed'">
+                                    Create
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </template>
+            </div>
+            {% endif %}
+
+            <!-- Navigation -->
+            <nav class="sidebar-nav flex-1 overflow-y-auto py-2 px-3" :class="sidebarCollapsed ? 'px-2' : 'px-3'">
+                {% block sidebar_nav %}
+                {% if request.workspace %}
+                <a href="{% url 'calendar:calendar' workspace_id=request.workspace.id %}" class="mb-1 sidebar-nav-item {% if request.resolver_match.url_name == 'calendar' %}active{% endif %}">
+                    <svg class="flex-shrink-0" width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+                    <span class="sidebar-nav-label">Publish</span>
+                </a>
+                <a href="{% url 'composer:create_landing' workspace_id=request.workspace.id %}" class="mb-1 sidebar-nav-item {% if request.resolver_match.url_name == 'create_landing' or request.resolver_match.url_name == 'compose' %}active{% endif %}">
+                    <svg class="flex-shrink-0" width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a7 7 0 00-4 12.73V16a1 1 0 001 1h6a1 1 0 001-1v-1.27A7 7 0 0012 2z"/><path d="M9 18h6"/><path d="M10 22h4"/><path d="M10 8.5c0 1.5 2 2.5 2 4"/><path d="M14 8.5c0 1.5-2 2.5-2 4"/></svg>
+                    <span class="sidebar-nav-label">Create Idea</span>
+                </a>                
+                <a href="{% url 'inbox:feed' workspace_id=request.workspace.id %}" class="mb-1 sidebar-nav-item {% if request.resolver_match.app_name == 'inbox' %}active{% endif %}">
+                    <svg class="flex-shrink-0" width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+                    <span class="sidebar-nav-label">Social Inbox</span>
+                    {% if sidebar_unread_inbox_count %}<span class="sidebar-badge">{{ sidebar_unread_inbox_count }}</span>{% endif %}
+                </a>
+                {% endif %}
+
+                <a href="{% url 'notifications:list' %}" class="mb-1 sidebar-nav-item {% if request.resolver_match.url_name == 'list' and request.resolver_match.app_name == 'notifications' %}active{% endif %}">
+                    <svg class="flex-shrink-0" width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
+                    <span class="sidebar-nav-label">Notifications</span>
+                </a>
+
+                {% if request.workspace %}
+                {% if analytics_enabled_platforms %}
+                <a href="{% url 'analytics:index' workspace_id=request.workspace.id %}" class="mb-1 sidebar-nav-item {% if request.resolver_match.app_name == 'analytics' %}active{% endif %}">
+                    <svg class="flex-shrink-0" width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 12l4-4 4 4 6-6"/></svg>
+                    <span class="sidebar-nav-label">Analytics</span>
+                </a>
+                {% endif %}
+                {% endif %}
+
+                {% comment %}
+                  Intelligence — opt-in via env. INTELLIGENCE_ENABLED is False
+                  for self-hosters who haven't configured the integration, so
+                  they see no Stripe / billing surface at all. (Django's {# #}
+                  comment syntax is single-line only; this used to be a {# #}
+                  block spanning three lines, which rendered as literal text
+                  in the sidebar.)
+                {% endcomment %}
+                {% if INTELLIGENCE_ENABLED and request.org %}
+                <a href="{% url 'intelligence:playground' org_id=request.org.id %}"
+                   class="mb-1 sidebar-nav-item {% if request.resolver_match.app_name == 'intelligence' %}active{% endif %}">
+                    <svg class="flex-shrink-0" width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polygon points="16.24 7.76 13.41 13.41 7.76 16.24 10.59 10.59 16.24 7.76"/></svg>
+                    <span class="sidebar-nav-label">Intelligence</span>
+                </a>
+                {% endif %}
+
+                {% if request.workspace %}
+                {% if sidebar_channels or sidebar_unhealthy_channels %}
+                <!-- Channels -->
+                <div class="group flex items-center justify-between mt-3.5 sidebar-section-label-wrap">
+                    <div class="sidebar-section-label" style="padding-top:0">Channels</div>
+                    <a href="{% url 'social_accounts:connect' workspace_id=request.workspace.id %}"
+                       class="opacity-0 group-hover:opacity-100 w-5 h-5 flex items-center justify-center rounded text-stone-400 hover:text-stone-600 transition-all mr-2 sidebar-nav-label"
+                       title="Connect a channel">
+                        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                    </a>
+                </div>
+                {% for channel in sidebar_channels %}
+                <a href="{% url 'social_accounts:list' workspace_id=request.workspace.id %}" class="sidebar-nav-item" title="{{ channel.queued_post_count|default:0 }} upcoming post{{ channel.queued_post_count|default:0|pluralize }} in the queue for {{ channel.account_name|default:channel.account_handle }}">
+                    <div class="relative flex-shrink-0">
+                        {% if channel.avatar_url %}
+                        <img src="{{ channel.avatar_url }}" alt="" class="w-7 h-7 rounded-full object-cover">
+                        {% else %}
+                        <div class="w-7 h-7 rounded-full bg-stone-200 flex items-center justify-center text-[11px] font-semibold text-stone-500">{{ channel.account_name|default:channel.account_handle|make_list|first|upper }}</div>
+                        {% endif %}
+                        <div class="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-white rounded-full flex items-center justify-center">
+                            {% include "partials/_platform_icon.html" with platform=channel.platform size="sm" %}
+                        </div>
+                    </div>
+                    <span class="sidebar-nav-label truncate">{{ channel.account_name|default:channel.account_handle }}</span>
+                    <span class="sidebar-badge">{{ channel.queued_post_count|default:0 }}</span>
+                </a>
+                {% endfor %}
+                {% endif %}
+
+                {% for channel in sidebar_unhealthy_channels %}
+                <div class="sidebar-nav-item flex items-center gap-2">
+                    <div class="relative flex-shrink-0 opacity-60">
+                        {% if channel.avatar_url %}
+                        <img src="{{ channel.avatar_url }}" alt="" class="w-7 h-7 rounded-full object-cover grayscale" x-data @error="$el.style.display='none';$el.nextElementSibling.style.display='flex'">
+                        <div class="w-7 h-7 rounded-full bg-stone-200 items-center justify-center text-[11px] font-semibold text-stone-500" style="display:none">{{ channel.account_name|default:channel.account_handle|make_list|first|upper }}</div>
+                        {% else %}
+                        <div class="w-7 h-7 rounded-full bg-stone-200 flex items-center justify-center text-[11px] font-semibold text-stone-500">{{ channel.account_name|default:channel.account_handle|make_list|first|upper }}</div>
+                        {% endif %}
+                        <div class="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-white rounded-full flex items-center justify-center">
+                            {% include "partials/_platform_icon.html" with platform=channel.platform size="sm" %}
+                        </div>
+                    </div>
+                    <span class="sidebar-nav-label truncate flex-1 text-stone-400 opacity-60">{{ channel.account_name|default:channel.account_handle }}</span>
+                    <form method="post" action="{% url 'social_accounts:reconnect' workspace_id=request.workspace.id account_id=channel.id %}" class="sidebar-nav-label">
+                        {% csrf_token %}
+                        <button type="submit" class="inline-flex items-center px-2 py-0.5 text-[11px] font-semibold text-orange-700 bg-orange-50 rounded-full hover:bg-orange-100 transition-colors cursor-pointer" title="Reconnect {{ channel.account_name|default:channel.account_handle }}">
+                            Reconnect
+                        </button>
+                    </form>
+                </div>
+                {% endfor %}
+
+                <!-- Connect channels (hidden when collapsed) -->
+                {% if sidebar_connectable_platforms %}
+                <div class="sidebar-connect-channels" x-show="!sidebarCollapsed">
+                <div class="sidebar-section-label">Connect channels</div>
+                {% for platform_key, platform_label in sidebar_connectable_platforms|slice:":3" %}
+                <a href="{% url 'social_accounts:connect' workspace_id=request.workspace.id %}" class="sidebar-nav-item">
+                    <div class="relative flex-shrink-0">
+                        <div class="w-4 h-4 flex items-center justify-center rounded-lg bg-stone-100">
+                            {% include "partials/_platform_icon.html" with platform=platform_key size="sm" %}
+                        </div>
+                        <div class="absolute -bottom-1 -right-1 w-2.5 h-2.5 rounded-full bg-orange-500 flex items-center justify-center ring-1 ring-white">
+                            <svg viewBox="0 0 24 24" fill="none" width="6" height="6" stroke="white" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12H19M12 5V19"/></svg>
+                        </div>
+                    </div>
+                    <span class="sidebar-nav-label">{{ platform_label }}</span>
+                </a>
+                {% endfor %}
+                <a href="{% url 'social_accounts:connect' workspace_id=request.workspace.id %}" class="sidebar-nav-item">
+                    <div class="w-4 h-4 flex items-center justify-center flex-shrink-0 rounded-lg bg-stone-100">
+                        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                    </div>
+                    <span class="sidebar-nav-label">More channels</span>
+                </a>
+                </div>
+                {% endif %}
+                {% endif %}
+                {% endblock %}
+            </nav>
+
+            <!-- Organization footer -->
+            <div class="sidebar-org-footer border-t border-stone-100 relative px-3 py-3" x-data="{ orgMenuOpen: false }"
+                 :class="sidebarCollapsed ? 'px-2 py-2' : 'px-3 py-3'">
+                <!-- Expanded: single row with org button + collapse toggle -->
+                <div class="sidebar-org-expanded flex items-center gap-1" x-show="!sidebarCollapsed">
+                    <button @click="orgMenuOpen = !orgMenuOpen"
+                            class="flex-1 flex items-center gap-2 px-1 py-1 rounded-lg hover:bg-black/[0.04] transition-colors cursor-pointer min-w-0">
+                        {% if user.avatar %}
+                        <img src="{{ user.avatar.url }}" alt="" class="w-8 h-8 rounded-full object-cover flex-shrink-0">
+                        {% else %}
+                        <div class="w-8 h-8 rounded-full bg-stone-200 flex items-center justify-center flex-shrink-0">
+                            <svg class="w-4 h-4 text-stone-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+                        </div>
+                        {% endif %}
+                        <div class="flex-1 min-w-0 text-left">
+                            <p class="text-sm font-semibold text-stone-800 truncate">{{ request.org.name|default:"My Organization" }}</p>
+                            <p class="text-[11px] text-stone-400 truncate">{% if user.name %}{{ user.name }}{% else %}{{ user.email }}{% endif %}</p>
+                        </div>
+                    </button>
+                    <button @click="sidebarCollapsed = true"
+                            class="hidden lg:flex w-7 h-7 items-center justify-center rounded-md text-stone-400 hover:text-stone-600 hover:bg-stone-100 transition-colors cursor-pointer flex-shrink-0"
+                            title="Collapse sidebar">
+                        <svg viewBox="0 0 24 24" fill="none" width="16" height="16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3V21M16 15L13 12L16 9M5 3H19C20.1046 3 21 3.89543 21 5V19C21 20.1046 20.1046 21 19 21H5C3.89543 21 3 20.1046 3 19V5C3 3.89543 3.89543 3 5 3Z"/></svg>
+                    </button>
+                </div>
+                <!-- Collapsed: stacked vertically -->
+                <div class="sidebar-org-collapsed flex flex-col items-center gap-2" x-show="sidebarCollapsed" x-cloak style="display:none">
+                    <button @click="sidebarCollapsed = false"
+                            class="w-7 h-7 flex items-center justify-center rounded-md text-stone-400 hover:text-stone-600 hover:bg-stone-100 transition-colors cursor-pointer"
+                            title="Expand sidebar">
+                        <svg viewBox="0 0 24 24" fill="none" width="16" height="16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="scale-x-[-1]"><path d="M9 3V21M16 15L13 12L16 9M5 3H19C20.1046 3 21 3.89543 21 5V19C21 20.1046 20.1046 21 19 21H5C3.89543 21 3 20.1046 3 19V5C3 3.89543 3.89543 3 5 3Z"/></svg>
+                    </button>
+                    <button @click="orgMenuOpen = !orgMenuOpen"
+                            class="w-8 h-8 rounded-full {% if not user.avatar %}bg-stone-200{% endif %} flex items-center justify-center cursor-pointer hover:bg-stone-300 transition-colors">
+                        {% if user.avatar %}
+                        <img src="{{ user.avatar.url }}" alt="" class="w-8 h-8 rounded-full object-cover">
+                        {% else %}
+                        <svg class="w-4 h-4 text-stone-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+                        {% endif %}
+                    </button>
+                </div>
+
+                <!-- Org menu popover -->
+                <div x-show="orgMenuOpen" @click.away="orgMenuOpen = false" x-cloak
+                     x-transition:enter="transition ease-out duration-100"
+                     x-transition:enter-start="opacity-0 scale-95"
+                     x-transition:enter-end="opacity-100 scale-100"
+                     x-transition:leave="transition ease-in duration-75"
+                     x-transition:leave-start="opacity-100 scale-100"
+                     x-transition:leave-end="opacity-0 scale-95"
+                     class="absolute bottom-full left-3 right-3 mb-2 bg-white rounded-xl shadow-lg ring-1 ring-stone-200 z-50 overflow-hidden">
+
+                    <!-- User info -->
+                    <div class="px-4 pt-4 pb-3">
+                        <p class="text-sm text-stone-500 truncate">{{ user.email }}</p>
+                        <p class="text-sm font-semibold text-stone-900 mt-1">{{ request.org.name|default:"My Organization" }}</p>
+                    </div>
+
+                    <!-- Manage Team button -->
+                    <div class="px-4 pb-3">
+                        <a href="{% url 'members:list' %}"
+                           class="w-full flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium text-stone-700 bg-white border border-stone-200 rounded-lg hover:bg-black/[0.04] transition-colors">
+                            <svg class="w-4 h-4 text-stone-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
+                            Manage Team
+                        </a>
+                    </div>
+
+                    <div class="border-t border-stone-100">
+                        <!-- Settings -->
+                        <a href="{% url 'accounts:settings' %}"
+                           class="flex items-center gap-3 px-4 py-2.5 text-sm text-stone-700 hover:bg-black/[0.04] transition-colors">
+                            <svg class="w-4 h-4 text-stone-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+                            Settings
+                        </a>
+                    </div>
+
+                    <div class="border-t border-stone-100">
+                        <!-- Log out -->
+                        <a href="{% url 'accounts:logout' %}"
+                           class="flex items-center gap-3 px-4 py-2.5 text-sm text-stone-700 hover:bg-black/[0.04] transition-colors">
+                            <svg class="w-4 h-4 text-stone-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+                            Log out
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main content area -->
+        <div class="flex-1 flex flex-col overflow-hidden">
+            <!-- Mobile top bar -->
+            <div class="flex lg:hidden items-center justify-between px-4 py-3 border-b border-stone-200 bg-white flex-shrink-0">
+                <button @click="mobileMenuOpen = !mobileMenuOpen"
+                        class="w-9 h-9 flex items-center justify-center rounded-lg text-stone-600 hover:bg-stone-100 transition-colors cursor-pointer -ml-1"
+                        title="Toggle menu">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="3" y1="6" x2="21" y2="6"/>
+                        <line x1="3" y1="12" x2="21" y2="12"/>
+                        <line x1="3" y1="18" x2="21" y2="18"/>
+                    </svg>
+                </button>
+                <div class="flex items-center gap-2">
+                    {% with current_ws=request.workspace %}
+                    {% if current_ws %}
+                    {% if current_ws.icon %}
+                    <img src="{{ current_ws.icon.url }}" alt="" class="w-7 h-7 rounded-md object-cover">
+                    {% else %}
+                    <div class="w-7 h-7 rounded-md flex items-center justify-center text-white text-[11px] font-bold" style="background: var(--primary);">{{ current_ws.name|make_list|first|upper }}</div>
+                    {% endif %}
+                    <span class="text-sm font-semibold text-stone-800 truncate max-w-[160px]">{{ current_ws.name }}</span>
+                    {% else %}
+                    <div class="w-7 h-7 rounded-md flex items-center justify-center text-white text-[11px] font-bold" style="background: var(--primary);">P</div>
+                    <span class="text-sm font-semibold text-stone-800">Brightbean</span>
+                    {% endif %}
+                    {% endwith %}
+                </div>
+                <div class="w-9"></div>
+            </div>
+            <!-- Main content -->
+            <main class="lg:border lg:border-stone-200 lg:m-2.5 bg-white lg:rounded-xl flex-1 p-3 sm:p-4 lg:p-6 overflow-y-auto flex flex-col">
+                {% block page_header %}{% endblock %}
+                {% if messages %}
+                <div class="mb-4 space-y-2">
+                    {% for message in messages %}
+                    <div class="rounded-md p-4 {% if message.tags == 'error' %}bg-red-50 text-red-800{% elif message.tags == 'success' %}bg-green-50 text-green-800{% else %}bg-blue-50 text-blue-800{% endif %}">
+                        {{ message }}
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                <div class="flex-1 min-h-0 flex flex-col overflow-y-auto overflow-x-hidden">
+                {% block content %}{% endblock %}
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- Onboarding checklist popup (fixed bottom-right) -->
+    {% include "onboarding/partials/_checklist.html" %}
+
+    {% else %}
+    <main class="auth-bg min-h-screen flex items-center justify-center py-12 px-4" style="font-family: var(--font-body);">
+        {% block auth_content %}{% endblock %}
+    </main>
+    {% endif %}
+
+    <!-- Vendored JS -->
+    <script src="{% static 'js/htmx.min.js' %}"></script>
+    <script nonce="{{ request.csp_nonce }}">
+        /* Notification bell - Alpine.js component */
+        function notificationBell() {
+            return {
+                open: false,
+                unreadCount: 0,
+                _interval: null,
+                toggle() {
+                    this.open = !this.open;
+                    if (this.open) {
+                        /* Refresh drawer content when opening */
+                        htmx.trigger('#notification-drawer-content', 'load');
+                    }
+                },
+                startPolling() {
+                    this.fetchCount();
+                    this._interval = setInterval(() => this.fetchCount(), 30000);
+                },
+                async fetchCount() {
+                    try {
+                        const resp = await fetch('{% url "notifications:unread_count" %}');
+                        if (resp.ok) {
+                            const data = await resp.json();
+                            this.unreadCount = data.count;
+                        }
+                    } catch (e) { /* silent */ }
+                },
+                destroy() {
+                    if (this._interval) clearInterval(this._interval);
+                }
+            };
+        }
+
+        /* Refresh unread count after any HTMX notification action */
+        document.body.addEventListener('htmx:afterSettle', function(evt) {
+            var target = evt.detail.target;
+            if (target && (target.id === 'notification-drawer-content' || target.id === 'notification-history-list' || target.closest && target.closest('#notification-drawer-content'))) {
+                /* Trigger a count refresh on the bell component */
+                var bellEl = document.querySelector('[x-data="notificationBell()"]');
+                if (bellEl && bellEl.__x) {
+                    bellEl.__x.$data.fetchCount();
+                }
+            }
+        });
+    </script>
+    <script src="{% static 'js/alpine.min.js' %}" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr@4.6.13/dist/flatpickr.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js"></script>
+    <script nonce="{{ request.csp_nonce }}">
+        /* Analytics hero chart: read data attrs off the canvas, (re)create Chart.js.
+           Lives in base.html so its CSP nonce matches the parent page — the chart
+           partial re-renders on HTMX swaps via the htmx:afterSwap hook below. */
+        function bbInitHeroChart(retries) {
+            if (typeof Chart === 'undefined') {
+                /* Chart.js is loaded synchronously above this script, so the
+                   poll should never fire in practice. Cap retries anyway —
+                   if the CDN ever fails (adblock, offline), recursing every
+                   30ms forever burns CPU on every page load. */
+                if ((retries || 0) > 30) return;
+                setTimeout(function () { bbInitHeroChart((retries || 0) + 1); }, 30);
+                return;
+            }
+            var canvas = document.getElementById('analytics-area-chart');
+            if (!canvas) return;
+            var data, labels;
+            try {
+                data = JSON.parse(canvas.dataset.series || '[]');
+                labels = JSON.parse(canvas.dataset.labels || '[]');
+            } catch (e) { return; }
+            var color = '#F97316';
+            if (window._bbHeroChart) { window._bbHeroChart.destroy(); }
+            var ctx = canvas.getContext('2d');
+            var gradient = ctx.createLinearGradient(0, 0, 0, 260);
+            function hexToRgba(c, a) {
+                var v = c.replace('#', '');
+                var r = parseInt(v.slice(0, 2), 16), g = parseInt(v.slice(2, 4), 16), b = parseInt(v.slice(4, 6), 16);
+                return 'rgba(' + r + ',' + g + ',' + b + ',' + a + ')';
+            }
+            gradient.addColorStop(0, hexToRgba(color, 0.28));
+            gradient.addColorStop(1, hexToRgba(color, 0.0));
+            window._bbHeroChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        data: data,
+                        borderColor: color,
+                        backgroundColor: gradient,
+                        fill: true,
+                        tension: 0.32,
+                        pointRadius: 0,
+                        pointHoverRadius: 4,
+                        pointHoverBackgroundColor: color,
+                        borderWidth: 2,
+                    }],
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: { mode: 'index', intersect: false },
+                    },
+                    scales: {
+                        x: { grid: { display: false }, ticks: { maxTicksLimit: 6, color: '#78716C' } },
+                        y: { beginAtZero: true, grid: { color: '#F5F5F4' }, ticks: { color: '#78716C' } },
+                    },
+                },
+            });
+        }
+        // Wrap in a no-arg callback so the DOMContentLoaded event object
+        // doesn't get passed as ``retries`` — that would make
+        // ``(retries || 0) + 1`` string-concatenate the event each tick and
+        // the ``> 30`` cap below would never trip when Chart.js is offline.
+        document.addEventListener('DOMContentLoaded', function () { bbInitHeroChart(); });
+        document.body.addEventListener('htmx:afterSwap', function(evt) {
+            var target = evt.detail && evt.detail.target;
+            if (target && target.id === 'analytics-hero-chart') {
+                bbInitHeroChart();
+            }
+        });
+
+        document.addEventListener('DOMContentLoaded', function() {
+            document.querySelectorAll('.form-datetime[type="date"]').forEach(function(el) {
+                var fp = flatpickr(el, {
+                    dateFormat: 'Y-m-d',
+                    altInput: true,
+                    altFormat: 'M j, Y',
+                    minDate: 'today',
+                    disableMobile: true,
+                });
+                fp.altInput.placeholder = el.getAttribute('data-placeholder') || 'Select date…';
+            });
+            document.querySelectorAll('.form-datetime[type="time"]').forEach(function(el) {
+                var fp = flatpickr(el, {
+                    enableTime: true,
+                    noCalendar: true,
+                    dateFormat: 'H:i',
+                    altInput: true,
+                    altFormat: 'h:i K',
+                    time_24hr: false,
+                    disableMobile: true,
+                });
+                fp.altInput.placeholder = el.getAttribute('data-placeholder') || 'Select time…';
+            });
+        });
+    </script>
+    {% if request.workspace %}
+    <script nonce="{{ request.csp_nonce }}">
+        window.ideaModalHelpers = window.ideaModalHelpers || {
+            mediaAssetIdsCsv(items) {
+                return (items || []).map(function(item) { return item.asset_id; }).join(',');
+            },
+            appendUploadedMedia(items, data, file) {
+                if (!items || !data || !data.asset_id) return;
+                var exists = items.some(function(item) { return item.asset_id === data.asset_id; });
+                if (exists) return;
+                items.push({
+                    asset_id: data.asset_id,
+                    url: data.url || '',
+                    filename: data.filename || (file && file.name) || '',
+                    media_type: data.media_type || ((file && file.type && file.type.startsWith('video/')) ? 'video' : 'image'),
+                });
+            },
+            getCsrfToken() {
+                var tokenInput = document.querySelector('[name=csrfmiddlewaretoken]');
+                if (tokenInput && tokenInput.value) return tokenInput.value;
+                var cookieMatch = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+                return cookieMatch ? decodeURIComponent(cookieMatch[1]) : '';
+            },
+            triggerIdeaChanged() {
+                if (window.htmx && typeof window.htmx.trigger === 'function') {
+                    window.htmx.trigger(document.body, 'ideaChanged');
+                    return;
+                }
+                document.body.dispatchEvent(new CustomEvent('ideaChanged', { bubbles: true }));
+            },
+            submitIdeaForm(formEl, onSuccess) {
+                if (!formEl) return Promise.resolve(false);
+                var url = formEl.getAttribute('action') || formEl.getAttribute('hx-post');
+                if (!url) return Promise.resolve(false);
+                var csrfToken = this.getCsrfToken();
+                if (!csrfToken) {
+                    window.alert('Security token missing. Please reload the page.');
+                    return Promise.resolve(false);
+                }
+                var formData = new FormData(formEl);
+                return fetch(url, {
+                    method: 'POST',
+                    headers: { 'X-CSRFToken': csrfToken },
+                    body: formData,
+                })
+                    .then(function(response) {
+                        if (!response.ok) throw new Error('save_failed');
+                    })
+                    .then(() => {
+                        this.triggerIdeaChanged();
+                        if (typeof onSuccess === 'function') onSuccess();
+                        return true;
+                    })
+                    .catch(() => {
+                        window.alert('Could not save the idea. Please try again.');
+                        return false;
+                    });
+            },
+            uploadIdeaMediaAsset(uploadUrl, file, onUploaded) {
+                var csrfToken = this.getCsrfToken();
+                if (!csrfToken) return Promise.reject(new Error('csrf_missing'));
+                var formData = new FormData();
+                formData.append('file', file);
+                return fetch(uploadUrl, {
+                    method: 'POST',
+                    headers: { 'X-CSRFToken': csrfToken },
+                    body: formData,
+                })
+                    .then(function(response) {
+                        if (!response.ok) throw new Error('upload_failed');
+                        return response.json();
+                    })
+                    .then((data) => {
+                        if (!data.asset_id) throw new Error('upload_failed');
+                        if (typeof onUploaded === 'function') onUploaded(data, file);
+                        return true;
+                    });
+            },
+        };
+
+        function sidebarNewMenu() {
+            const ideaHelpers = window.ideaModalHelpers;
+            return {
+                newMenuOpen: false,
+                showCreateModal: false,
+                createSelectedGroup: '{% if sidebar_idea_columns %}{{ sidebar_idea_columns.0.id }}{% endif %}',
+                createSelectedTags: [],
+                createGroupDropdownOpen: false,
+                createTagDropdownOpen: false,
+                createTagSearch: '',
+                showCreateTagModal: false,
+                newTagName: '',
+                createMediaAssets: [],
+                createMediaUploadCount: 0,
+                isCreateSaving: false,
+                emojiPickerOpen: false,
+                _mediaDragOver: false,
+                allTags: [{% for tag in sidebar_idea_tags %}'{{ tag|escapejs }}'{% if not forloop.last %},{% endif %}{% endfor %}],
+
+                _columnMap: { {% for col in sidebar_idea_columns %}'{{ col.id }}': '{{ col.label }}'{% if not forloop.last %}, {% endif %}{% endfor %} },
+                _defaultGroupId: '{% if sidebar_idea_columns %}{{ sidebar_idea_columns.0.id }}{% endif %}',
+
+                openCreateModal() {
+                    this.newMenuOpen = false;
+                    this.showCreateModal = true;
+                    this.createSelectedGroup = this._defaultGroupId;
+                    this.createSelectedTags = [];
+                    this.createTagSearch = '';
+                    this.showCreateTagModal = false;
+                    this.newTagName = '';
+                    this.createMediaAssets = [];
+                    this.createMediaUploadCount = 0;
+                    this.isCreateSaving = false;
+                    if (this.$refs.sidebarIdeaFileInput) this.$refs.sidebarIdeaFileInput.value = '';
+                },
+
+                closeCreateModal() {
+                    this.showCreateModal = false;
+                    this.createSelectedGroup = this._defaultGroupId;
+                    this.createSelectedTags = [];
+                    this.createGroupDropdownOpen = false;
+                    this.createTagDropdownOpen = false;
+                    this.createTagSearch = '';
+                    this.emojiPickerOpen = false;
+                    this._emojiSearch = '';
+                    this.closeCreateTagModal();
+                    this.createMediaAssets = [];
+                    this.createMediaUploadCount = 0;
+                    this.isCreateSaving = false;
+                    if (this.$refs.sidebarIdeaFileInput) this.$refs.sidebarIdeaFileInput.value = '';
+                },
+
+                createMediaAssetIdsCsv() {
+                    return ideaHelpers.mediaAssetIdsCsv(this.createMediaAssets);
+                },
+
+                createPrimaryMediaAssetId() {
+                    return this.createMediaAssets.length ? this.createMediaAssets[0].asset_id : '';
+                },
+
+                createGroupLabel() {
+                    return this._columnMap[this.createSelectedGroup] || 'Unassigned';
+                },
+
+                toggleCreateTag(tag) {
+                    var idx = this.createSelectedTags.indexOf(tag);
+                    if (idx === -1) { this.createSelectedTags.push(tag); }
+                    else { this.createSelectedTags.splice(idx, 1); }
+                },
+
+                get filteredCreateTags() {
+                    var q = this.createTagSearch.toLowerCase();
+                    return this.allTags.filter(function(t) { return !q || t.toLowerCase().includes(q); });
+                },
+
+                persistAndToggleCreateTag(name) {
+                    name = name.trim();
+                    if (!name) return;
+                    if (!this.allTags.includes(name)) { this.allTags.push(name); this.allTags.sort(); }
+                    if (!this.createSelectedTags.includes(name)) { this.createSelectedTags.push(name); }
+                    this.createTagSearch = '';
+                    this._persistTag(name);
+                },
+
+                closeCreateTagModal() {
+                    this.showCreateTagModal = false;
+                    this.newTagName = '';
+                },
+
+                createTagFromModal() {
+                    var name = this.newTagName.trim();
+                    if (!name) return;
+                    this.persistAndToggleCreateTag(name);
+                    this.closeCreateTagModal();
+                },
+
+                _persistTag(name) {
+                    var csrfToken = document.querySelector('[name=csrfmiddlewaretoken]');
+                    if (!csrfToken) return;
+                    fetch('{% url "composer:tag_create" workspace_id=request.workspace.id %}', {
+                        method: 'POST',
+                        headers: { 'X-CSRFToken': csrfToken.value, 'Content-Type': 'application/x-www-form-urlencoded' },
+                        body: 'name=' + encodeURIComponent(name),
+                    });
+                },
+
+                // Emoji picker
+                _emojiSearch: '',
+                _emojiList: [
+                    {e:'😀',n:'grinning'},{e:'😃',n:'smiley'},{e:'😄',n:'smile'},{e:'😁',n:'grin'},{e:'😆',n:'laughing'},
+                    {e:'😅',n:'sweat smile'},{e:'🤣',n:'rofl'},{e:'😂',n:'joy'},{e:'🙂',n:'slight smile'},{e:'😊',n:'blush'},
+                    {e:'😇',n:'innocent'},{e:'🥰',n:'love'},{e:'😍',n:'heart eyes'},{e:'🤩',n:'star struck'},{e:'😘',n:'kiss'},
+                    {e:'😜',n:'wink tongue'},{e:'🤔',n:'thinking'},{e:'🤗',n:'hugging'},{e:'🤫',n:'shushing'},{e:'😎',n:'cool'},
+                    {e:'🥳',n:'party'},{e:'😤',n:'triumph'},{e:'😱',n:'scream'},{e:'🥺',n:'pleading'},{e:'😢',n:'cry'},
+                    {e:'👍',n:'thumbs up'},{e:'👎',n:'thumbs down'},{e:'👏',n:'clap'},{e:'🙌',n:'raised hands'},{e:'🤝',n:'handshake'},
+                    {e:'💪',n:'strong'},{e:'✌️',n:'peace'},{e:'🤞',n:'crossed fingers'},{e:'👋',n:'wave'},{e:'🫡',n:'salute'},
+                    {e:'❤️',n:'red heart'},{e:'🧡',n:'orange heart'},{e:'💛',n:'yellow heart'},{e:'💚',n:'green heart'},{e:'💙',n:'blue heart'},
+                    {e:'💜',n:'purple heart'},{e:'🖤',n:'black heart'},{e:'🤍',n:'white heart'},{e:'💯',n:'hundred'},{e:'💥',n:'boom'},
+                    {e:'⭐',n:'star'},{e:'🌟',n:'glowing star'},{e:'✨',n:'sparkles'},{e:'⚡',n:'lightning'},{e:'🔥',n:'fire'},
+                    {e:'🎉',n:'party popper'},{e:'🎊',n:'confetti'},{e:'🏆',n:'trophy'},{e:'🎯',n:'bullseye'},{e:'🚀',n:'rocket'},
+                    {e:'💡',n:'light bulb'},{e:'📌',n:'pin'},{e:'📎',n:'paperclip'},{e:'📝',n:'memo'},{e:'✏️',n:'pencil'},
+                    {e:'✅',n:'check mark'},{e:'❌',n:'cross mark'},{e:'⚠️',n:'warning'},{e:'❓',n:'question'},{e:'❗',n:'exclamation'},
+                    {e:'💬',n:'speech'},{e:'👀',n:'eyes'},{e:'🎨',n:'art'},{e:'📸',n:'camera'},{e:'🎬',n:'clapper'},
+                    {e:'📱',n:'phone'},{e:'💻',n:'laptop'},{e:'📊',n:'chart'},{e:'📈',n:'trending up'},{e:'📅',n:'calendar'},
+                    {e:'⏰',n:'alarm clock'},{e:'🔗',n:'link'},{e:'🔒',n:'lock'},{e:'🏷️',n:'label'},{e:'📣',n:'megaphone'},
+                    {e:'🌍',n:'globe'},{e:'☀️',n:'sun'},{e:'🌙',n:'moon'},{e:'🌈',n:'rainbow'},{e:'🍕',n:'pizza'},
+                    {e:'☕',n:'coffee'},{e:'🍺',n:'beer'},{e:'🎵',n:'music'},{e:'🐶',n:'dog'},{e:'🐱',n:'cat'},
+                    {e:'✍️',n:'writing'},{e:'🧠',n:'brain'},{e:'💎',n:'gem'},{e:'🪄',n:'magic wand'},{e:'🎁',n:'gift'},
+                ],
+
+                _filteredEmojis() {
+                    var q = (this._emojiSearch || '').toLowerCase().trim();
+                    if (!q) return this._emojiList;
+                    return this._emojiList.filter(function(em) { return em.n.includes(q); });
+                },
+
+                _insertEmoji(emoji) {
+                    var desc = document.querySelector('.idea-modal textarea.idea-desc-input');
+                    if (desc) {
+                        var start = desc.selectionStart;
+                        var end = desc.selectionEnd;
+                        desc.value = desc.value.substring(0, start) + emoji + desc.value.substring(end);
+                        desc.selectionStart = desc.selectionEnd = start + emoji.length;
+                        desc.focus();
+                        desc.dispatchEvent(new Event('input', { bubbles: true }));
+                    }
+                    this._emojiSearch = '';
+                },
+
+                // Media file handling
+                _handleFileSelect(event) {
+                    this._enqueueMediaFiles(event.target.files);
+                    event.target.value = '';
+                },
+
+                _handleMediaDrop(event) {
+                    this._enqueueMediaFiles(event.dataTransfer.files);
+                },
+
+                _enqueueMediaFiles(fileList) {
+                    var files = Array.from(fileList || []);
+                    for (var i = 0; i < files.length; i += 1) {
+                        this._uploadIdeaMediaAsset(files[i]);
+                    }
+                },
+
+                _appendUploadedMedia(data, file) {
+                    ideaHelpers.appendUploadedMedia(this.createMediaAssets, data, file);
+                },
+
+                _removeCreateMedia(index) {
+                    if (index < 0 || index >= this.createMediaAssets.length) return;
+                    this.createMediaAssets.splice(index, 1);
+                },
+
+                _getCsrfToken() {
+                    return ideaHelpers.getCsrfToken();
+                },
+
+                _triggerIdeaChanged() {
+                    ideaHelpers.triggerIdeaChanged();
+                },
+
+                _submitIdeaForm(formEl) {
+                    return ideaHelpers.submitIdeaForm.call(ideaHelpers, formEl, () => {
+                        this.closeCreateModal();
+                        formEl.reset();
+                    });
+                },
+
+                submitCreateIdea(event) {
+                    if (this.createMediaUploadCount > 0 || this.isCreateSaving) return;
+                    this.isCreateSaving = true;
+                    this._submitIdeaForm(event.target).finally(() => {
+                        this.isCreateSaving = false;
+                    });
+                },
+
+                _uploadIdeaMediaAsset(file) {
+                    if (!file) return;
+                    this.createMediaUploadCount += 1;
+                    ideaHelpers
+                        .uploadIdeaMediaAsset(
+                            '{% url "composer:idea_upload_media" workspace_id=request.workspace.id %}',
+                            file,
+                            (data, uploadedFile) => {
+                                this._appendUploadedMedia(data, uploadedFile);
+                            }
+                        )
+                        .catch(() => {
+                            window.alert('One of the files failed to upload. Please try again.');
+                        })
+                        .finally(() => {
+                            this.createMediaUploadCount = Math.max(0, this.createMediaUploadCount - 1);
+                        });
+                },
+            };
+        }
+    </script>
+    {% endif %}
+    {% block extra_js %}{% endblock %}
+    {% if can_create_workspace %}
+    <!-- Create workspace modal -->
+    <div x-data="{ createWsOpen: false }"
+         @open-create-ws.window="createWsOpen = true; $nextTick(() => $refs.newWsName.focus())">
+        <div x-show="createWsOpen" x-cloak class="fixed inset-0 z-[100] flex items-center justify-center">
+            <div class="absolute inset-0 bg-black/40" @click="createWsOpen = false"></div>
+            <div class="relative bg-white rounded-xl shadow-xl ring-1 ring-stone-200 w-full max-w-md mx-4 p-6"
+                 x-show="createWsOpen"
+                 x-transition:enter="transition ease-out duration-150"
+                 x-transition:enter-start="opacity-0 scale-95"
+                 x-transition:enter-end="opacity-100 scale-100"
+                 x-transition:leave="transition ease-in duration-100"
+                 x-transition:leave-start="opacity-100 scale-100"
+                 x-transition:leave-end="opacity-0 scale-95"
+                 @keydown.escape.window="createWsOpen = false">
+                <h3 class="text-base font-semibold text-stone-900 mb-4">Create workspace</h3>
+                <form method="post" action="{% url 'workspaces:create' %}">
+                    {% csrf_token %}
+                    <input type="text" name="name" x-ref="newWsName" required placeholder="Workspace name"
+                           class="form-input-styled w-full mb-4">
+                    <div class="flex justify-end gap-2">
+                        <button type="button" @click="createWsOpen = false"
+                                class="px-4 py-2 text-sm font-medium text-stone-600 bg-white border border-stone-200 rounded-lg hover:bg-stone-50 transition-colors cursor-pointer">
+                            Cancel
+                        </button>
+                        <button type="submit"
+                                class="btn-brand px-4 py-2 text-sm cursor-pointer">
+                            Create
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+</body>
+</html>

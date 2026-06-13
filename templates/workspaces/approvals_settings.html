@@ -1,0 +1,66 @@
+{% extends "layouts/workspace_settings.html" %}
+{% block title %}Approvals - {{ workspace.name }} - Brightbean{% endblock %}
+{% block content %}
+<div class="max-w-2xl">
+    <h2 class="text-xl font-semibold mb-2" style="color: var(--text-primary);">Approvals</h2>
+    <p class="text-sm mb-8" style="color: var(--text-secondary);">
+        Control whether posts need to be reviewed before they can be scheduled or published.
+    </p>
+
+    <form method="POST" x-data="{ mode: '{{ workspace.approval_workflow_mode }}' }">
+        {% csrf_token %}
+
+        <div class="flex flex-col gap-3 mb-8">
+            {% for value, label in approval_modes.choices %}
+            <label class="flex items-start gap-3 p-4 rounded-lg cursor-pointer transition-colors"
+                   :style="mode === '{{ value }}'
+                        ? 'border: 1px solid var(--primary); background: var(--primary-soft, var(--surface-0)); box-shadow: 0 0 0 3px var(--primary-ring);'
+                        : 'border: 1px solid var(--border); background: var(--surface-0);'"
+                   {% if not is_owner_or_manager %}style="cursor: not-allowed; opacity: 0.7;"{% endif %}>
+                <input type="radio"
+                       name="approval_workflow_mode"
+                       value="{{ value }}"
+                       x-model="mode"
+                       class="mt-1"
+                       {% if not is_owner_or_manager %}disabled{% endif %}
+                       {% if workspace.approval_workflow_mode == value %}checked{% endif %}>
+                <div class="flex-1">
+                    <div class="text-sm font-semibold mb-0.5" style="color: var(--text-primary);">
+                        {% if value == 'none' %}No approvals
+                        {% elif value == 'optional' %}Optional approvals
+                        {% elif value == 'required_internal' %}Internal review required
+                        {% elif value == 'required_internal_and_client' %}Internal review + client approval
+                        {% else %}{{ label }}
+                        {% endif %}
+                    </div>
+                    <div class="text-xs" style="color: var(--text-secondary);">
+                        {% if value == 'none' %}
+                            Anyone with publishing rights can schedule or publish directly.
+                        {% elif value == 'optional' %}
+                            Creators can choose to submit a post for review, but it's not required.
+                        {% elif value == 'required_internal' %}
+                            Every post must be approved by a team member with review rights before it can go out.
+                        {% elif value == 'required_internal_and_client' %}
+                            Posts go through internal review, then are sent to the client portal for final sign-off.
+                        {% endif %}
+                    </div>
+                </div>
+            </label>
+            {% endfor %}
+        </div>
+
+        {% if is_owner_or_manager %}
+        <button type="submit"
+                class="btn-neutral px-5 py-2 text-sm font-medium rounded-full cursor-pointer whitespace-nowrap"
+                style="background: var(--neutral-100); color: var(--text-primary);">
+            Save Changes
+        </button>
+        {% endif %}
+    </form>
+
+    <p class="text-xs mt-6" style="color: var(--text-tertiary);">
+        Reviewers are workspace members with the "Approve posts" permission.
+        Manage them on the <a href="{% url 'members:list' %}" class="underline" style="color: var(--text-secondary);">Members</a> page.
+    </p>
+</div>
+{% endblock %}
