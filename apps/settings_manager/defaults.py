@@ -47,6 +47,7 @@ APP_DEFAULTS = {
     "infra.publishing_poll_seconds": 15,
     "infra.media_preprocessing_lookahead_minutes": 60,
     "infra.max_concurrent_publish_jobs": 10,
+    "infra.max_concurrent_posts": 4,
     "infra.recurrence_generation_interval": "daily",
     "infra.cleanup_job_schedule": "daily_03:00_utc",
 }

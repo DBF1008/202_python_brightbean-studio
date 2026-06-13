@@ -1,7 +1,56 @@
 """Settings cascade helper: workspace -> org -> app default."""
 
+import logging
+import re
+
 from .defaults import APP_DEFAULTS
 from .models import OrgSetting, WorkspaceSetting
+
+logger = logging.getLogger(__name__)
+
+# Hardcoded safe fallback — avoids circular reliance on APP_DEFAULTS parsing.
+_BACKOFF_FALLBACK = [60, 300, 1800]  # 1min, 5min, 30min
+
+_UNIT_MAP = {"s": 1, "sec": 1, "min": 60, "h": 3600, "hr": 3600}
+_TOKEN_RE = re.compile(r"(\d+)\s*(s|sec|min|h|hr)?", re.IGNORECASE)
+
+
+def parse_backoff_schedule(raw, *, fallback=None):
+    """Parse a backoff schedule string into a list of seconds.
+
+    Accepted formats per token: ``"60"``, ``"60s"``, ``"1min"``, ``"5h"``.
+    A bare list (from a JSON-field override) is coerced to ints directly.
+
+    On any parse error the *fallback* is returned (defaulting to
+    ``[60, 300, 1800]``).
+    """
+    if isinstance(raw, (list, tuple)):
+        try:
+            return [int(v) for v in raw]
+        except (ValueError, TypeError):
+            return fallback or _BACKOFF_FALLBACK
+
+    if not isinstance(raw, str) or not raw.strip():
+        return fallback or _BACKOFF_FALLBACK
+
+    try:
+        result = []
+        for token in raw.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            match = _TOKEN_RE.fullmatch(token)
+            if not match:
+                raise ValueError(f"Unparseable token: {token!r}")
+            value = int(match.group(1))
+            unit = (match.group(2) or "s").lower()
+            result.append(value * _UNIT_MAP[unit])
+        if not result:
+            raise ValueError("Empty schedule")
+        return result
+    except (ValueError, KeyError):
+        logger.warning("Invalid backoff schedule %r, using fallback", raw)
+        return fallback or _BACKOFF_FALLBACK
 
 
 def get_setting(workspace_id, key, workspace_org_id=None):

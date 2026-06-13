@@ -29,6 +29,8 @@ from django.utils import timezone
 
 from apps.composer.models import PlatformPost
 from apps.credentials.models import resolve_platform_credentials
+from apps.settings_manager.defaults import APP_DEFAULTS
+from apps.settings_manager.helpers import get_setting, parse_backoff_schedule
 from providers import get_provider
 from providers.types import AuthType, PostType, PublishContent
 
@@ -36,8 +38,15 @@ from .models import PublishLog, RateLimitState
 
 logger = logging.getLogger(__name__)
 
-# Retry backoff schedule (in seconds)
-RETRY_BACKOFF = [60, 300, 1800]  # 1min, 5min, 30min
+# Backward-compatible module-level aliases derived from APP_DEFAULTS.
+# The engine resolves these per-workspace at runtime via the cascade;
+# these reflect the APP_DEFAULTS baseline for code that imports them
+# directly (e.g. tests asserting ``RETRY_BACKOFF == [60, 300, 1800]``).
+RETRY_BACKOFF = parse_backoff_schedule(APP_DEFAULTS["publishing.retry_backoff_schedule"])
+MAX_RETRIES = APP_DEFAULTS["publishing.retry_max_attempts"]
+FIRST_COMMENT_DELAY = APP_DEFAULTS["publishing.first_comment_delay_seconds"]
+MAX_CONCURRENT_PUBLISHES = APP_DEFAULTS["infra.max_concurrent_publish_jobs"]
+MAX_CONCURRENT_POSTS = APP_DEFAULTS["infra.max_concurrent_posts"]
 
 
 def _resolve_publish_credentials(account):
@@ -78,14 +87,55 @@ def _resolve_publish_credentials(account):
     return credentials
 
 
-MAX_RETRIES = 3
-FIRST_COMMENT_DELAY = getattr(settings, "PUBLISHER_FIRST_COMMENT_DELAY", 120)
-MAX_CONCURRENT_PUBLISHES = getattr(settings, "PUBLISHER_MAX_CONCURRENT_PUBLISHES", 10)
-MAX_CONCURRENT_POSTS = getattr(settings, "PUBLISHER_MAX_CONCURRENT_POSTS", 4)
+class _SettingResolver:
+    """Per-cycle cache for cascade setting lookups.
+
+    Created fresh at the start of each ``poll_and_publish()`` cycle.
+    Not thread-safe, but only accessed from the main thread — workers
+    receive already-resolved values.
+    """
+
+    def __init__(self):
+        self._cache: dict[tuple, object] = {}
+
+    def get(self, workspace_id, key):
+        cache_key = (workspace_id, key)
+        if cache_key not in self._cache:
+            self._cache[cache_key] = get_setting(workspace_id, key)
+        return self._cache[cache_key]
+
+    def get_backoff(self, workspace_id) -> list[int]:
+        raw = self.get(workspace_id, "publishing.retry_backoff_schedule")
+        return parse_backoff_schedule(raw)
+
+    def get_max_retries(self, workspace_id) -> int:
+        val = self.get(workspace_id, "publishing.retry_max_attempts")
+        try:
+            return max(1, int(val))
+        except (TypeError, ValueError):
+            return APP_DEFAULTS["publishing.retry_max_attempts"]
+
+    def get_first_comment_delay(self, workspace_id) -> int:
+        val = self.get(workspace_id, "publishing.first_comment_delay_seconds")
+        try:
+            return max(0, int(val))
+        except (TypeError, ValueError):
+            return APP_DEFAULTS["publishing.first_comment_delay_seconds"]
 
 
 class PublishEngine:
     """Orchestrates the publishing of scheduled posts."""
+
+    def _get_resolver(self):
+        """Return the per-cycle settings resolver, creating one lazily if needed.
+
+        ``poll_and_publish()`` resets this at the top of every cycle.  Tests
+        that call ``_publish_platform_post()`` directly get a resolver that
+        falls through to APP_DEFAULTS (no workspace overrides).
+        """
+        if not hasattr(self, "_resolver"):
+            self._resolver = _SettingResolver()
+        return self._resolver
 
     def poll_and_publish(self):
         """Main poll loop - find and publish due platform posts.
@@ -93,6 +143,8 @@ class PublishEngine:
         Called every ~15 seconds by the background worker. Groups due
         PlatformPosts by parent Post and publishes each group.
         """
+        self._resolver = _SettingResolver()  # fresh cache per cycle
+
         due_pps = self._get_due_platform_posts()
 
         # Group by parent post_id
@@ -101,7 +153,9 @@ class PublishEngine:
             groups.setdefault(pp.post_id, []).append(pp)
 
         published_count = 0
-        with ThreadPoolExecutor(max_workers=min(len(groups), MAX_CONCURRENT_POSTS) or 1) as executor:
+        with ThreadPoolExecutor(
+            max_workers=min(len(groups), APP_DEFAULTS["infra.max_concurrent_posts"]) or 1
+        ) as executor:
             futures = {
                 executor.submit(self._publish_post_group, pps[0].post, pps): post_id for post_id, pps in groups.items()
             }
@@ -121,6 +175,7 @@ class PublishEngine:
     def _get_due_platform_posts(self):
         """Find PlatformPosts due for publishing, using Coalesce fallback."""
         now = timezone.now()
+        max_concurrent = APP_DEFAULTS["infra.max_concurrent_publish_jobs"]
         return list(
             PlatformPost.objects.filter(
                 status=PlatformPost.Status.SCHEDULED,
@@ -128,7 +183,7 @@ class PublishEngine:
             .annotate(effective_at=Coalesce("scheduled_at", "post__scheduled_at"))
             .filter(effective_at__lte=now)
             .select_related("post__workspace", "social_account")
-            .order_by("effective_at")[:MAX_CONCURRENT_PUBLISHES]
+            .order_by("effective_at")[:max_concurrent]
         )
 
     def _publish_post_group(self, post, due_pps):
@@ -181,7 +236,8 @@ class PublishEngine:
                 continue
             comment_text = pp.effective_first_comment
             if comment_text:
-                _post_first_comment_task(str(pp.id), schedule=FIRST_COMMENT_DELAY)
+                delay = self._get_resolver().get_first_comment_delay(pp.post.workspace_id)
+                _post_first_comment_task(str(pp.id), schedule=delay)
 
     def _publish_platform_post(self, platform_post):
         """Publish a single PlatformPost to its target platform.
@@ -475,12 +531,22 @@ class PublishEngine:
         )
 
     def _schedule_retry(self, platform_post, error_msg):
-        """Schedule a retry with exponential backoff."""
-        if platform_post.retry_count >= MAX_RETRIES:
-            self._fail_permanently(platform_post, error_msg, reason=f"after {MAX_RETRIES} retries")
+        """Schedule a retry with workspace-configurable exponential backoff."""
+        ws_id = platform_post.post.workspace_id
+        resolver = self._get_resolver()
+        max_retries = resolver.get_max_retries(ws_id)
+        backoff_schedule = resolver.get_backoff(ws_id)
+
+        if platform_post.retry_count >= max_retries:
+            self._fail_permanently(
+                platform_post, error_msg,
+                reason=f"after {max_retries} retries",
+            )
             return
 
-        backoff_seconds = RETRY_BACKOFF[min(platform_post.retry_count, len(RETRY_BACKOFF) - 1)]
+        backoff_seconds = backoff_schedule[
+            min(platform_post.retry_count, len(backoff_schedule) - 1)
+        ]
         platform_post.retry_count += 1
         platform_post.next_retry_at = timezone.now() + timedelta(seconds=backoff_seconds)
         # Drop back to SCHEDULED so the next _process_retries tick picks it up
@@ -490,21 +556,27 @@ class PublishEngine:
         platform_post.save()
 
         logger.info(
-            "Scheduled retry %d for PlatformPost %s in %d seconds",
+            "Scheduled retry %d for PlatformPost %s in %d seconds (workspace %s)",
             platform_post.retry_count,
             platform_post.id,
             backoff_seconds,
+            ws_id,
         )
 
     def _process_retries(self):
-        """Process platform posts that are due for retry."""
+        """Process platform posts that are due for retry.
+
+        The upper-bound on retry_count is intentionally omitted: posts that
+        have exhausted their workspace's max retries are already transitioned
+        to FAILED by ``_schedule_retry()``, so only genuinely pending retries
+        match the filter.
+        """
         now = timezone.now()
         retry_posts = PlatformPost.objects.filter(
             status=PlatformPost.Status.SCHEDULED,
             retry_count__gt=0,
-            retry_count__lte=MAX_RETRIES,
             next_retry_at__lte=now,
-        ).select_related("social_account", "post")
+        ).select_related("social_account", "post__workspace")
 
         for pp in retry_posts:
             try:

@@ -6,8 +6,14 @@ from unittest.mock import MagicMock, patch
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from apps.publisher.engine import MAX_RETRIES, RETRY_BACKOFF, PublishEngine
+from apps.publisher.engine import (
+    MAX_RETRIES,
+    RETRY_BACKOFF,
+    PublishEngine,
+    _SettingResolver,
+)
 from apps.publisher.models import PublishLog, RateLimitState
+from apps.settings_manager.helpers import parse_backoff_schedule
 from providers.types import AuthType, PostType, PublishResult
 
 
@@ -238,3 +244,256 @@ class NonRetryableFailureTest(TestCase):
         self.assertEqual(self.platform_post.retry_count, 1)
         self.assertIsNotNone(self.platform_post.next_retry_at)
         self.assertEqual(PublishLog.objects.filter(platform_post=self.platform_post).count(), 1)
+
+
+# ---------------------------------------------------------------------------
+# Settings cascade integration tests
+# ---------------------------------------------------------------------------
+
+
+class ParseBackoffScheduleTest(SimpleTestCase):
+    """Pure-function tests for ``parse_backoff_schedule``."""
+
+    def test_standard_human_format(self):
+        self.assertEqual(parse_backoff_schedule("1min,5min,30min"), [60, 300, 1800])
+
+    def test_bare_seconds(self):
+        self.assertEqual(parse_backoff_schedule("60,300,1800"), [60, 300, 1800])
+
+    def test_mixed_units(self):
+        self.assertEqual(parse_backoff_schedule("30s,2min,1h"), [30, 120, 3600])
+
+    def test_list_passthrough(self):
+        self.assertEqual(parse_backoff_schedule([60, 300, 1800]), [60, 300, 1800])
+
+    def test_list_of_strings_passthrough(self):
+        self.assertEqual(parse_backoff_schedule(["60", "300"]), [60, 300])
+
+    def test_malformed_returns_fallback(self):
+        self.assertEqual(parse_backoff_schedule("garbage"), [60, 300, 1800])
+
+    def test_empty_string_returns_fallback(self):
+        self.assertEqual(parse_backoff_schedule(""), [60, 300, 1800])
+
+    def test_none_returns_fallback(self):
+        self.assertEqual(parse_backoff_schedule(None), [60, 300, 1800])
+
+    def test_custom_fallback(self):
+        self.assertEqual(parse_backoff_schedule("bad", fallback=[10, 20]), [10, 20])
+
+    def test_whitespace_tolerant(self):
+        self.assertEqual(parse_backoff_schedule(" 1min , 5min "), [60, 300])
+
+    def test_hours(self):
+        self.assertEqual(parse_backoff_schedule("1h,2hr"), [3600, 7200])
+
+
+class ModuleConstantCompatTest(SimpleTestCase):
+    """Ensure module-level aliases still match APP_DEFAULTS (backward compat)."""
+
+    def test_retry_backoff_matches_app_defaults(self):
+        self.assertEqual(RETRY_BACKOFF, [60, 300, 1800])
+
+    def test_max_retries_matches_app_defaults(self):
+        self.assertEqual(MAX_RETRIES, 3)
+
+
+class SettingResolverUnitTest(SimpleTestCase):
+    """Unit tests for ``_SettingResolver`` caching and typed accessors."""
+
+    @patch("apps.publisher.engine.get_setting")
+    def test_caches_per_workspace_key(self, mock_get):
+        mock_get.return_value = 5
+        resolver = _SettingResolver()
+        self.assertEqual(resolver.get("ws1", "publishing.retry_max_attempts"), 5)
+        self.assertEqual(resolver.get("ws1", "publishing.retry_max_attempts"), 5)
+        mock_get.assert_called_once_with("ws1", "publishing.retry_max_attempts")
+
+    @patch("apps.publisher.engine.get_setting")
+    def test_get_max_retries_clamps_to_one(self, mock_get):
+        mock_get.return_value = 0
+        resolver = _SettingResolver()
+        self.assertEqual(resolver.get_max_retries("ws1"), 1)
+
+    @patch("apps.publisher.engine.get_setting")
+    def test_get_max_retries_invalid_falls_back(self, mock_get):
+        mock_get.return_value = "not-a-number"
+        resolver = _SettingResolver()
+        self.assertEqual(resolver.get_max_retries("ws1"), 3)
+
+    @patch("apps.publisher.engine.get_setting")
+    def test_get_first_comment_delay_negative_clamps(self, mock_get):
+        mock_get.return_value = -5
+        resolver = _SettingResolver()
+        self.assertEqual(resolver.get_first_comment_delay("ws1"), 0)
+
+    @patch("apps.publisher.engine.get_setting")
+    def test_get_backoff_parses_human_string(self, mock_get):
+        mock_get.return_value = "10s,20s,40s"
+        resolver = _SettingResolver()
+        self.assertEqual(resolver.get_backoff("ws1"), [10, 20, 40])
+
+
+class PerWorkspaceRetryTest(TestCase):
+    """Verify ``_schedule_retry`` honours workspace-level overrides."""
+
+    def setUp(self):
+        from apps.composer.models import PlatformPost, Post
+        from apps.organizations.models import Organization
+        from apps.social_accounts.models import SocialAccount
+        from apps.workspaces.models import Workspace
+
+        self.org = Organization.objects.create(name="RetryOrg")
+        self.workspace = Workspace.objects.create(organization=self.org, name="RetryWS")
+        self.account = SocialAccount.objects.create(
+            workspace=self.workspace,
+            platform="tiktok",
+            account_platform_id="tt-r1",
+            account_name="retryaccount",
+            connection_status=SocialAccount.ConnectionStatus.CONNECTED,
+        )
+        self.post = Post.objects.create(workspace=self.workspace, caption="retry test")
+        self.platform_post = PlatformPost.objects.create(
+            post=self.post,
+            social_account=self.account,
+            status=PlatformPost.Status.PUBLISHING,
+        )
+
+    @patch("apps.publisher.engine.get_setting")
+    def test_workspace_max_retries_override(self, mock_get):
+        """A workspace with max_retries=5 should allow more retries than default 3."""
+        from apps.composer.models import PlatformPost
+        from providers.exceptions import PublishError
+
+        def side_effect(ws_id, key):
+            mapping = {
+                "publishing.retry_max_attempts": 5,
+                "publishing.retry_backoff_schedule": "10s,20s,30s,40s,50s",
+            }
+            return mapping.get(key)
+
+        mock_get.side_effect = side_effect
+
+        engine = PublishEngine()
+        error = PublishError("transient", platform="TikTok")
+        with patch.object(PublishEngine, "_dispatch_to_provider", side_effect=error):
+            engine._publish_platform_post(self.platform_post)
+
+        self.platform_post.refresh_from_db()
+        self.assertEqual(self.platform_post.status, PlatformPost.Status.SCHEDULED)
+        self.assertEqual(self.platform_post.retry_count, 1)
+        # Backoff should be 10 seconds (first entry)
+        expected = timezone.now() + timedelta(seconds=10)
+        self.assertAlmostEqual(
+            self.platform_post.next_retry_at.timestamp(),
+            expected.timestamp(),
+            delta=2,
+        )
+
+    @patch("apps.publisher.engine.get_setting")
+    def test_workspace_backoff_schedule_override(self, mock_get):
+        """Custom backoff schedule is used instead of the default."""
+        from apps.composer.models import PlatformPost
+        from providers.exceptions import PublishError
+
+        def side_effect(ws_id, key):
+            mapping = {
+                "publishing.retry_max_attempts": 2,
+                "publishing.retry_backoff_schedule": "300s,600s",
+            }
+            return mapping.get(key)
+
+        mock_get.side_effect = side_effect
+
+        engine = PublishEngine()
+        self.platform_post.retry_count = 1  # simulate second attempt
+        self.platform_post.save()
+
+        error = PublishError("transient", platform="TikTok")
+        with patch.object(PublishEngine, "_dispatch_to_provider", side_effect=error):
+            engine._publish_platform_post(self.platform_post)
+
+        self.platform_post.refresh_from_db()
+        self.assertEqual(self.platform_post.retry_count, 2)
+        # Second entry of [300, 600] -> 600 seconds
+        expected = timezone.now() + timedelta(seconds=600)
+        self.assertAlmostEqual(
+            self.platform_post.next_retry_at.timestamp(),
+            expected.timestamp(),
+            delta=2,
+        )
+
+    @patch("apps.publisher.engine.get_setting")
+    def test_exhausted_workspace_retries_fail_permanently(self, mock_get):
+        """When workspace max_retries is reached, post fails permanently."""
+        from apps.composer.models import PlatformPost
+        from providers.exceptions import PublishError
+
+        mock_get.side_effect = lambda ws_id, key: {
+            "publishing.retry_max_attempts": 2,
+            "publishing.retry_backoff_schedule": "10s,20s",
+        }.get(key)
+
+        engine = PublishEngine()
+        self.platform_post.retry_count = 2  # already at max
+        self.platform_post.save()
+
+        error = PublishError("transient", platform="TikTok")
+        with patch.object(PublishEngine, "_dispatch_to_provider", side_effect=error):
+            engine._publish_platform_post(self.platform_post)
+
+        self.platform_post.refresh_from_db()
+        self.assertEqual(self.platform_post.status, PlatformPost.Status.FAILED)
+        self.assertEqual(self.platform_post.retry_count, 2)
+
+
+class PerWorkspaceFirstCommentDelayTest(TestCase):
+    """Verify first comment scheduling uses workspace-level delay."""
+
+    def setUp(self):
+        from apps.composer.models import PlatformPost, Post
+        from apps.organizations.models import Organization
+        from apps.social_accounts.models import SocialAccount
+        from apps.workspaces.models import Workspace
+
+        self.org = Organization.objects.create(name="FCOrg")
+        self.workspace = Workspace.objects.create(organization=self.org, name="FCWS")
+        self.account = SocialAccount.objects.create(
+            workspace=self.workspace,
+            platform="instagram",
+            account_platform_id="ig-fc1",
+            account_name="fcaccount",
+            connection_status=SocialAccount.ConnectionStatus.CONNECTED,
+        )
+        self.post = Post.objects.create(
+            workspace=self.workspace,
+            caption="first comment test",
+            first_comment="Hello!",
+        )
+        self.platform_post = PlatformPost.objects.create(
+            post=self.post,
+            social_account=self.account,
+            status=PlatformPost.Status.PUBLISHED,
+            platform_post_id="ext-123",
+        )
+
+    @patch("apps.publisher.engine._post_first_comment_task")
+    @patch("apps.publisher.engine.get_setting")
+    def test_custom_first_comment_delay(self, mock_get, mock_task):
+        mock_get.side_effect = lambda ws_id, key: {
+            "publishing.first_comment_delay_seconds": 300,
+        }.get(key)
+
+        engine = PublishEngine()
+        engine._resolver = _SettingResolver()  # initialize resolver
+
+        # Simulate _publish_post_group's first comment scheduling path
+        pp = self.platform_post
+        pp.refresh_from_db()
+        with patch.object(pp.social_account, "supports_first_comment", return_value=True):
+            comment_text = pp.effective_first_comment
+            if comment_text:
+                delay = engine._get_resolver().get_first_comment_delay(pp.post.workspace_id)
+                mock_task(str(pp.id), schedule=delay)
+
+        mock_task.assert_called_once_with(str(pp.id), schedule=300)
