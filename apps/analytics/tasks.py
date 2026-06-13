@@ -10,10 +10,13 @@ Cadence (per the plan's "How new metrics get pulled" section):
   * Posts 30–90 days old             → weekly
   * Posts > 90 days old              → stop
 
-The per-post cadence is exposed via :func:`post_sync_interval` so callers
-that need the same ladder (the agent-API freshness helpers in
-``apps/analytics/freshness.py``) cannot drift from what the sync loop
-actually does.
+All cadence thresholds, backfill windows and freshness intervals are
+resolved through the workspace → org → app-default settings cascade in
+:mod:`apps.analytics.analytics_config`.  Both the sync loop and the
+agent-API freshness helpers call
+:meth:`AnalyticsConfig.post_sync_interval` on the *same* config, so the
+``next_sync_eta`` the API exposes can never drift from what the worker
+actually executes.
 """
 
 from __future__ import annotations
@@ -31,12 +34,17 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Post-sync cadence — single source of truth.
+# App-default fallbacks.
+#
+# These module-level constants mirror ``defaults.py`` so that code paths
+# without workspace context (management commands, tests) still work.
+# The sync loop and freshness helpers resolve settings via
+# ``analytics_config.resolve_analytics_config`` — these are the *last
+# resort* fallback when no config is supplied.
 # ---------------------------------------------------------------------------
 
 # Tail of the per-post sync schedule. Each entry is ``(max_age, interval)`` —
-# the first row whose ``max_age`` is greater than the post's age wins. The
-# final row is ``(None, None)`` to mark the past-horizon stop.
+# the first row whose ``max_age`` is greater than the post's age wins.
 _POST_SYNC_CADENCE: tuple[tuple[timedelta | None, timedelta | None], ...] = (
     (timedelta(days=1), timedelta(hours=1)),
     (timedelta(days=7), timedelta(hours=6)),
@@ -46,14 +54,25 @@ _POST_SYNC_CADENCE: tuple[tuple[timedelta | None, timedelta | None], ...] = (
 )
 
 
-def post_sync_interval(age: timedelta) -> timedelta | None:
+def post_sync_interval(
+    age: timedelta,
+    config=None,
+) -> timedelta | None:
     """Return the sync interval for a post of the given ``age``.
 
-    ``None`` means the post is past the 90-day horizon and the background
-    sync no longer refreshes it. Shared between the sync loop
+    ``None`` means the post is past the horizon and the background sync
+    no longer refreshes it.  Shared between the sync loop
     (``_post_cadence_due``) and the agent-API freshness helpers so the
     two cannot drift.
+
+    When ``config`` (:class:`~apps.analytics.analytics_config.AnalyticsConfig`)
+    is provided, the interval is read from the settings cascade — this is
+    the preferred path.  Without ``config``, falls back to the module-level
+    :data:`_POST_SYNC_CADENCE` (the app default), preserving backward
+    compatibility for management commands and tests.
     """
+    if config is not None:
+        return config.post_sync_interval(age)
     for max_age, interval in _POST_SYNC_CADENCE:
         if max_age is None or age < max_age:
             return interval
@@ -61,6 +80,8 @@ def post_sync_interval(age: timedelta) -> timedelta | None:
 
 
 # Per-platform backfill window (days) on initial connect.
+# Kept as a module constant for management-command fallback; the sync loop
+# uses ``config.backfill_cap_for(platform)`` instead.
 BACKFILL_DAYS_PER_PLATFORM: dict[str, int] = {
     "facebook": 90,
     "instagram": 90,
@@ -321,6 +342,8 @@ def _write_post_snapshot(post, metric_values: dict[str, float], on_date: dt_date
 # the snapshot table instead of being lost. Days that already have rows
 # are skipped, so on a steady-state account this costs at most one extra
 # API call when today is the only missing day.
+# NOTE: this is the app-default fallback; the sync loop uses
+# ``config.account_metrics_recent_days`` when a config is available.
 _ACCOUNT_METRICS_RECENT_DAYS = 3
 
 # Earliest plausible startDate for a YouTube Analytics ``/reports`` query —
@@ -341,12 +364,15 @@ _POST_NON_CADENCE_METRICS_BY_PLATFORM: dict[str, frozenset[str]] = {
 }
 
 
-def _sync_account_metrics(account, on_date: dt_date) -> None:
+def _sync_account_metrics(account, on_date: dt_date, *, config=None) -> None:
     """Fetch account-level metrics for ``on_date`` and any recent missing days.
 
-    Walks ``on_date`` and the prior ``_ACCOUNT_METRICS_RECENT_DAYS - 1`` days,
-    skipping days that already have an :class:`AccountInsightsSnapshot`. For
-    providers without lag (Instagram, Facebook) this is a no-op past
+    Walks ``on_date`` and the prior ``recent_days - 1`` days, skipping days
+    that already have an :class:`AccountInsightsSnapshot`. ``recent_days``
+    is read from ``config.account_metrics_recent_days`` when a config is
+    provided, otherwise falls back to :data:`_ACCOUNT_METRICS_RECENT_DAYS`.
+
+    For providers without lag (Instagram, Facebook) this is a no-op past
     ``on_date`` because the existing rows short-circuit the iteration.
 
     For YouTube, also fetches per-video Analytics-API metrics (watch_time,
@@ -359,12 +385,17 @@ def _sync_account_metrics(account, on_date: dt_date) -> None:
 
     provider = _resolve_provider(account)
     tz = timezone.get_current_timezone()
+    # Resolve the recent-days walk-back from config (settings cascade) with
+    # the module constant as app-default fallback.
+    recent_days_setting = (
+        config.account_metrics_recent_days if config is not None else _ACCOUNT_METRICS_RECENT_DAYS
+    )
     # Providers whose stats endpoint returns only lifetime totals (TikTok)
     # must NOT have those totals written into past dates as if they were
     # historical observations — that fabricates fake history. Run only the
     # current day for them; backfill of true historical values is impossible
     # without an API that supports it.
-    recent_days = _ACCOUNT_METRICS_RECENT_DAYS if getattr(provider, "account_metrics_supports_date_range", True) else 1
+    recent_days = recent_days_setting if getattr(provider, "account_metrics_supports_date_range", True) else 1
     for offset in range(recent_days):
         target = on_date - timedelta(days=offset)
         if AccountInsightsSnapshot.objects.filter(social_account=account, date=target).exists():
@@ -469,7 +500,7 @@ def _mark_needs_reconnect(account):
     account.save(update_fields=["analytics_needs_reconnect", "updated_at"])
 
 
-def _post_cadence_due(post, now=None, *, platform: str | None = None) -> bool:
+def _post_cadence_due(post, now=None, *, platform: str | None = None, config=None) -> bool:
     """Decide whether ``post`` is due for a new ``_sync_post_metrics`` sync.
 
     Looks at the latest ``PostInsightsSnapshot.captured_at`` for ``post`` and
@@ -482,13 +513,18 @@ def _post_cadence_due(post, now=None, *, platform: str | None = None) -> bool:
 
     ``platform`` may be supplied by callers iterating posts of a known
     account to avoid the implicit ``post.social_account.platform`` lookup.
+
+    ``config`` (:class:`~apps.analytics.analytics_config.AnalyticsConfig`)
+    threads the settings cascade into :func:`post_sync_interval` so the
+    cadence check uses the same (potentially overridden) ladder the
+    freshness helpers expose.
     """
     from .models import PostInsightsSnapshot
 
     now = now or timezone.now()
     if not post.published_at:
         return False
-    cadence = post_sync_interval(now - post.published_at)
+    cadence = post_sync_interval(now - post.published_at, config=config)
     if cadence is None:
         return False  # past the 90-day horizon.
     qs = PostInsightsSnapshot.objects.filter(platform_post=post)
@@ -517,25 +553,32 @@ def backfill_account_analytics(account_id: str, days: int | None = None) -> None
 
     Per-post: for every published post within the platform's window, fetch
     its current cumulative metrics and write today's snapshot rows.
+
+    The backfill cap and sync cadence are resolved through the workspace
+    settings cascade so per-workspace / per-org overrides take effect
+    immediately on the next backfill trigger.
     """
+    from apps.analytics.analytics_config import resolve_analytics_config
     from apps.composer.models import PlatformPost
     from apps.social_accounts.models import AnalyticsPlatformConfig, SocialAccount
 
     try:
-        account = SocialAccount.objects.get(id=account_id)
+        account = SocialAccount.objects.select_related("workspace").get(id=account_id)
     except SocialAccount.DoesNotExist:
         return
     enabled = set(AnalyticsPlatformConfig.enabled_platforms())
     if account.platform not in enabled:
         return
-    cap = BACKFILL_DAYS_PER_PLATFORM.get(account.platform, DEFAULT_BACKFILL_DAYS)
+
+    cfg = resolve_analytics_config(account.workspace_id, account.workspace.organization_id)
+    cap = cfg.backfill_cap_for(account.platform)
     if cap == 0:
         return
     days = min(days or cap, cap)
     today = timezone.now().date()
     cutoff = timezone.now() - timedelta(days=days)
 
-    _sync_account_metrics(account, today)
+    _sync_account_metrics(account, today, config=cfg)
 
     posts = PlatformPost.objects.filter(
         social_account=account,
@@ -549,7 +592,13 @@ def backfill_account_analytics(account_id: str, days: int | None = None) -> None
 
 @background(schedule=0)
 def sync_all_account_analytics() -> None:
-    """Hourly cron: refresh enabled accounts on the decay-by-age schedule."""
+    """Hourly cron: refresh enabled accounts on the decay-by-age schedule.
+
+    Resolves the analytics config once per account (via the workspace
+    settings cascade) so per-workspace cadence and backfill overrides
+    take effect without a deploy.
+    """
+    from apps.analytics.analytics_config import resolve_analytics_config
     from apps.composer.models import PlatformPost
     from apps.social_accounts.models import AnalyticsPlatformConfig, SocialAccount
 
@@ -565,13 +614,18 @@ def sync_all_account_analytics() -> None:
     from .models import AccountInsightsSnapshot
 
     for account in accounts:
-        # Account-level: at most once per day per account. Skip if today's
-        # row already exists so an hourly cron doesn't turn into 24 API calls.
+        cfg = resolve_analytics_config(account.workspace_id, account.workspace.organization_id)
+
+        # Account-level: at most once per ``cfg.account_sync_interval``
+        # per account. The hourly cron checks for today's row so it
+        # doesn't turn into N API calls per day — the settings-driven
+        # interval is used by the freshness helpers to compute
+        # ``next_sync_eta`` and must match what the worker actually does.
         if not AccountInsightsSnapshot.objects.filter(social_account=account, date=today).exists():
-            _sync_account_metrics(account, today)
+            _sync_account_metrics(account, today, config=cfg)
 
         # Per-post: only those whose cadence window has elapsed
-        cap_days = BACKFILL_DAYS_PER_PLATFORM.get(account.platform, DEFAULT_BACKFILL_DAYS)
+        cap_days = cfg.backfill_cap_for(account.platform)
         if cap_days == 0:
             continue
         cutoff = timezone.now() - timedelta(days=cap_days)
@@ -581,5 +635,5 @@ def sync_all_account_analytics() -> None:
             published_at__gte=cutoff,
         ).exclude(platform_post_id="")
         for post in posts:
-            if _post_cadence_due(post, platform=account.platform):
+            if _post_cadence_due(post, platform=account.platform, config=cfg):
                 _sync_post_metrics(post, today)

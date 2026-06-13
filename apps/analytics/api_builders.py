@@ -14,6 +14,7 @@ parity-safe serialization.
 
 from __future__ import annotations
 
+from apps.analytics.analytics_config import resolve_analytics_config
 from apps.api.schemas import (
     AccountAnalyticsResponse,
     DerivedMetricResponse,
@@ -71,10 +72,14 @@ def build_account_analytics(account: SocialAccount, days: int) -> AccountAnalyti
     # the same scan, so ``account_freshness`` skips its ``Max`` aggregate.
     bundle = account_analytics_bundle(account, days)
     series_map = bundle["series_map"]
+    # Resolve the settings cascade once; both freshness and the response
+    # use the same config, guaranteeing next_sync_eta matches the worker.
+    cfg = resolve_analytics_config(account.workspace_id, account.workspace.organization_id)
     captured_at, next_sync_eta = account_freshness(
         account,
         last_captured_at=bundle["max_captured_at"],
         have_last_captured_at=True,
+        config=cfg,
     )
     hero = [
         DerivedMetricResponse.from_derived(card["metric"], card["label"], card["derived"])
@@ -119,6 +124,10 @@ def build_post_analytics(post: Post) -> PostAnalyticsResponse:
     Each ``PlatformPost`` gets its own envelope so a mixed-platform post
     (e.g. one Threads child + one Bluesky child) reports
     ``analytics_available`` independently per platform.
+
+    Resolves the :class:`AnalyticsConfig` once from the post's workspace
+    and threads it into every :func:`post_freshness` call — avoids N
+    redundant settings-cascade lookups for posts in the same workspace.
     """
     # ``_get_workspace_post`` (REST) and ``_get_post_for_key`` (MCP) already
     # prefetch ``platform_posts__social_account``; calling ``.all()`` here
@@ -128,16 +137,18 @@ def build_post_analytics(post: Post) -> PostAnalyticsResponse:
     # Resolve the admin-configured enable list once, not per child, so a
     # mixed-platform post stays at a single config query.
     enabled_platforms = AnalyticsPlatformConfig.enabled_platforms()
+    # Resolve settings once — all children share the same workspace.
+    cfg = resolve_analytics_config(post.workspace_id)
     return PostAnalyticsResponse(
         post_id=post.id,
         workspace_id=post.workspace_id,
         title=post.title,
         caption=post.caption,
-        platform_posts=[_build_platform_post_analytics(child, enabled_platforms) for child in children],
+        platform_posts=[_build_platform_post_analytics(child, enabled_platforms, config=cfg) for child in children],
     )
 
 
-def _build_platform_post_analytics(platform_post, enabled_platforms: list[str]) -> PlatformPostAnalyticsResponse:
+def _build_platform_post_analytics(platform_post, enabled_platforms: list[str], *, config=None) -> PlatformPostAnalyticsResponse:
     account = platform_post.social_account
     reason = unavailable_reason(account.platform, enabled_platforms)
 
@@ -176,6 +187,7 @@ def _build_platform_post_analytics(platform_post, enabled_platforms: list[str]) 
         platform_post,
         last_captured_at=detail["captured_at"],
         have_last_captured_at=True,
+        config=config,
     )
     tiles = [
         PostMetricTileResponse(

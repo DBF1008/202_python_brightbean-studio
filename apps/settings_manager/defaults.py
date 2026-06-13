@@ -33,6 +33,45 @@ APP_DEFAULTS = {
     "inbox.sync_interval_minutes": 5,
     "inbox.auto_resolve_on_reply": True,
     "inbox.sla_target_response_minutes": 120,
+    # ── Analytics: sync cadence & backfill ────────────────────────────
+    #
+    # Post-sync cadence ladder.  Each entry is ``[max_age_days, interval_hours]``;
+    # the first row whose ``max_age_days`` exceeds the post's age wins.  Posts
+    # older than the *last* row's ``max_age_days`` are no longer synced.
+    # The values below reproduce the original hardcoded schedule:
+    #   <24 h → 1 h,  1–7 d → 6 h,  7–30 d → 1 d,  30–90 d → 7 d,  >90 d → stop
+    "analytics.post_sync_cadence": [[1, 1], [7, 6], [30, 24], [90, 168]],
+    # How often account-level metrics are synced (hours).  The hourly cron
+    # skips accounts that already have today's row, so this effectively
+    # caps account syncs to once per this many hours.
+    "analytics.account_sync_interval_hours": 24,
+    # Sentinel delay (minutes) for just-connected accounts / just-published
+    # posts with no snapshot rows yet — the agent polls back shortly rather
+    # than waiting a full sync interval.
+    "analytics.first_poll_delay_minutes": 5,
+    # Default backfill window (days) on initial connect / reconnect.
+    "analytics.backfill_days_default": 90,
+    # Per-platform backfill overrides.  ``0`` means the platform has no
+    # analytics surface and the backfill task should skip it entirely.
+    "analytics.backfill_days_per_platform": {
+        "facebook": 90,
+        "instagram": 90,
+        "instagram_login": 90,
+        "linkedin_company": 90,
+        "youtube": 90,
+        "pinterest": 90,
+        "threads": 90,
+        "google_business": 90,
+        "tiktok": 60,
+        "bluesky": 0,
+        "mastodon": 0,
+        "linkedin_personal": 0,
+    },
+    # Number of recent days to walk back when syncing account-level metrics.
+    # Some providers (YouTube Analytics) lag 1-2 days; iterating recent days
+    # lets finalized data backfill into past dates instead of being lost.
+    "analytics.account_metrics_recent_days": 3,
+    # ── Analytics: optimal-time & high-frequency collection ──────────
     "analytics.optimal_time_lookback_days": 90,
     "analytics.optimal_time_min_posts": 10,
     "analytics.high_frequency_collection_hours": 48,
