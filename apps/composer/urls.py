@@ -68,6 +68,7 @@ urlpatterns = [
     path("import/csv/", views.csv_upload, name="csv_upload"),
     path("import/csv/preview/", views.csv_preview, name="csv_preview"),
     path("import/csv/confirm/", views.csv_confirm_import, name="csv_confirm_import"),
+    path("import/csv/jobs/<uuid:job_id>/status/", views.csv_import_status, name="csv_import_status"),
     # Tags
     path("tags/", views.tag_list, name="tag_list"),
     path("tags/create/", views.tag_create, name="tag_create"),

@@ -35,6 +35,7 @@ from providers.tiktok import VALID_PRIVACY_LEVELS as TIKTOK_PRIVACY_LEVELS
 from .forms import ContentCategoryForm, PostForm
 from .models import (
     ContentCategory,
+    CSVImportJob,
     Feed,
     Idea,
     IdeaGroup,
@@ -2591,7 +2592,21 @@ def csv_preview(request, workspace_id):
 @require_permission("create_posts")
 @require_POST
 def csv_confirm_import(request, workspace_id):
-    """Kick off the CSV import as a background job."""
+    """Persist the mapped CSV as a background import job and show live progress.
+
+    The heavy per-row work (Post/PlatformPost creation, scheduling, category &
+    tag handling) now happens in ``apps.composer.csv_import`` under the
+    ``process_tasks`` worker. Here we only snapshot the wizard's CSV into a
+    self-contained ``CSVImportJob`` (file + column mapping + row count), enqueue
+    it, and hand back the polling progress partial.
+    """
+    import csv
+    import io
+
+    from django.core.files.base import ContentFile
+
+    from .tasks import process_csv_import_job_task
+
     workspace = _get_workspace(request, workspace_id)
     csv_data = request.session.get(f"csv_import_{workspace.id}")
     mapping = request.session.get(f"csv_mapping_{workspace.id}")
@@ -2599,108 +2614,63 @@ def csv_confirm_import(request, workspace_id):
     if not csv_data or not mapping:
         return HttpResponse("No CSV data found. Please upload again.", status=400)
 
-    from apps.social_accounts.models import SocialAccount
+    headers = csv_data.get("headers", [])
+    rows = csv_data.get("rows", [])
 
-    rows = csv_data["rows"]
-    created_count = 0
-    error_count = 0
+    # Rebuild a self-contained CSV (header row + data rows) so the job owns its
+    # file and the worker no longer depends on the upload session.
+    buffer = io.StringIO()
+    csv_writer = csv.writer(buffer)
+    csv_writer.writerow(headers)
+    csv_writer.writerows(rows)
+    csv_bytes = buffer.getvalue().encode("utf-8")
 
-    for row in rows:
-        try:
-            caption = row[mapping["caption"]].strip() if "caption" in mapping and mapping["caption"] < len(row) else ""
-            if not caption:
-                error_count += 1
-                continue
+    job = CSVImportJob.objects.create(
+        workspace=workspace,
+        uploaded_by=request.user,
+        column_mapping=mapping,
+        total_rows=len(rows),
+        status=CSVImportJob.Status.PENDING,
+    )
+    job.file.save(f"import-{job.id}.csv", ContentFile(csv_bytes), save=True)
 
-            post = Post(
-                workspace=workspace,
-                author=request.user,
-                caption=caption,
-            )
-            initial_pp_status = "draft"
+    # Enqueue background processing (runs under `manage.py process_tasks`).
+    process_csv_import_job_task(str(job.id))
 
-            # Date + time
-            if "date" in mapping and mapping["date"] < len(row):
-                date_str = row[mapping["date"]].strip()
-                time_str = ""
-                if "time" in mapping and mapping["time"] < len(row):
-                    time_str = row[mapping["time"]].strip()
-
-                if date_str:
-                    import zoneinfo
-
-                    ws_tz = workspace.effective_timezone or "UTC"
-                    tz = zoneinfo.ZoneInfo(ws_tz)
-                    from datetime import time as time_cls
-
-                    d = datetime.strptime(date_str, "%Y-%m-%d").date()
-                    t = datetime.strptime(time_str, "%H:%M").time() if time_str else time_cls(9, 0)
-                    naive_dt = datetime.combine(d, t)
-                    post.scheduled_at = naive_dt.replace(tzinfo=tz)
-                    initial_pp_status = "scheduled"
-
-            # First comment
-            if "first_comment" in mapping and mapping["first_comment"] < len(row):
-                post.first_comment = row[mapping["first_comment"]].strip()
-
-            # Tags
-            if "tags" in mapping and mapping["tags"] < len(row):
-                tags_raw = row[mapping["tags"]].strip()
-                if tags_raw:
-                    post.tags = [t.strip() for t in tags_raw.split(",") if t.strip()]
-
-            # Category
-            if "category" in mapping and mapping["category"] < len(row):
-                cat_name = row[mapping["category"]].strip()
-                if cat_name:
-                    cat, _ = ContentCategory.objects.get_or_create(
-                        workspace=workspace,
-                        name=cat_name,
-                        defaults={"color": "#3B82F6"},
-                    )
-                    post.category = cat
-
-            post.save()
-
-            # Platforms
-            if "platforms" in mapping and mapping["platforms"] < len(row):
-                platforms_str = row[mapping["platforms"]].strip()
-                if platforms_str:
-                    for p in platforms_str.split(","):
-                        p = p.strip().lower()
-                        accounts = SocialAccount.objects.filter(
-                            workspace=workspace,
-                            platform=p,
-                            connection_status=SocialAccount.ConnectionStatus.CONNECTED,
-                        )
-                        for acc in accounts:
-                            PlatformPost.objects.get_or_create(
-                                post=post,
-                                social_account=acc,
-                                defaults={
-                                    "status": initial_pp_status,
-                                    "scheduled_at": post.scheduled_at,
-                                },
-                            )
-
-            created_count += 1
-        except Exception:
-            error_count += 1
-
-    # Clean up session data
+    # The job is now the source of truth — drop the wizard's session state.
     request.session.pop(f"csv_import_{workspace.id}", None)
     request.session.pop(f"csv_mapping_{workspace.id}", None)
 
     return render(
         request,
         "composer/partials/csv_progress.html",
-        {
-            "workspace": workspace,
-            "created_count": created_count,
-            "error_count": error_count,
-            "total_rows": len(rows),
-        },
+        {"workspace": workspace, "job": job},
     )
+
+
+@login_required
+@require_permission("create_posts")
+@require_GET
+def csv_import_status(request, workspace_id, job_id):
+    """Return the live progress partial, or the result partial once finished.
+
+    Polled by HTMX. While the job is pending/processing this re-renders the
+    progress partial (which keeps polling); once the job is completed or failed
+    it renders the completion partial, which omits the polling trigger so HTMX
+    stops on its own.
+    """
+    workspace = _get_workspace(request, workspace_id)
+    job = get_object_or_404(
+        CSVImportJob.objects.for_workspace(workspace.id),
+        id=job_id,
+    )
+
+    if job.status in (CSVImportJob.Status.COMPLETED, CSVImportJob.Status.FAILED):
+        template = "composer/partials/csv_complete.html"
+    else:
+        template = "composer/partials/csv_progress.html"
+
+    return render(request, template, {"workspace": workspace, "job": job})
 
 
 # ---------------------------------------------------------------------------
