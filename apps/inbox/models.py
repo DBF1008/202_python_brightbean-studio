@@ -122,6 +122,17 @@ class InboxMessage(models.Model):
     def platform(self):
         return self.social_account.platform
 
+    @property
+    def sla_anchor(self):
+        """Effective start of the current SLA cycle, for countdown display.
+
+        Mirrors the anchor the background worker uses so the UI countdown stays
+        consistent across reopen/reassign. Imported lazily to avoid a cycle.
+        """
+        from . import sla
+
+        return sla.sla_anchor(self)
+
 
 class InboxReply(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

@@ -10,6 +10,7 @@ from apps.notifications.models import EventType
 from apps.social_accounts.models import SocialAccount
 from providers import get_provider
 
+from . import sla
 from .models import InboxMessage, InboxSLAConfig
 from .sentiment import analyze_sentiment
 
@@ -82,7 +83,8 @@ class InboxSyncEngine:
         )
         if created:
             obj.sentiment = analyze_sentiment(obj.body)
-            obj.save(update_fields=["sentiment"])
+            sla.arm_sla(obj, anchor=obj.received_at)
+            obj.save(update_fields=["sentiment", "extra"])
             self._notify_new_message(obj)
 
     def _notify_new_message(self, message):
@@ -109,23 +111,33 @@ class InboxSyncEngine:
             )
 
     def check_sla(self):
-        """Check for SLA-overdue messages and send notifications."""
-        from datetime import timedelta
+        """Check for SLA-overdue messages and (re)send notifications.
 
+        Overdue is recomputed on every pass from the message's current cycle
+        anchor and the *current* config target, so reopen, reassignment and
+        config changes all re-trigger correctly. ``sla_notified`` suppresses
+        duplicate alerts within a cycle and is cleared once a message is no
+        longer overdue (e.g. the target was lengthened), re-arming it.
+        """
+        now = timezone.now()
         configs = InboxSLAConfig.objects.filter(is_active=True).select_related("workspace")
 
         for config in configs:
-            threshold = timezone.now() - timedelta(minutes=config.target_response_minutes)
-            overdue_messages = InboxMessage.objects.filter(
+            pending = InboxMessage.objects.filter(
                 workspace=config.workspace,
-                status__in=[InboxMessage.Status.UNREAD, InboxMessage.Status.OPEN],
-                received_at__lte=threshold,
-            ).exclude(extra__has_key="sla_notified")
+                status__in=sla.PENDING_STATUSES,
+            ).select_related("assigned_to", "social_account")
 
-            for message in overdue_messages:
-                self._notify_sla_overdue(message, config)
-                message.extra["sla_notified"] = True
-                message.save(update_fields=["extra"])
+            for message in pending:
+                overdue = sla.is_overdue(message, config, now=now)
+                notified = sla.is_notified(message)
+                if overdue and not notified:
+                    self._notify_sla_overdue(message, config)
+                    sla.mark_notified(message)
+                    message.save(update_fields=["extra"])
+                elif not overdue and notified:
+                    if sla.clear_notified(message):
+                        message.save(update_fields=["extra"])
 
     def _notify_sla_overdue(self, message, config):
         """Notify about an SLA-overdue message."""

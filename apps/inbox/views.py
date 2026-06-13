@@ -17,6 +17,7 @@ from apps.social_accounts.models import SocialAccount
 from apps.workspaces.models import Workspace
 from providers import get_provider
 
+from . import sla
 from .forms import (
     AssignForm,
     BulkActionForm,
@@ -247,13 +248,15 @@ def send_reply(request, workspace_id, message_id):
         platform_reply_id=platform_reply_id,
     )
 
-    # Auto-resolve on reply if configured
+    # Auto-resolve on reply if configured; otherwise surface unread as open.
+    # Either path runs through sla.transition_status so SLA state stays in sync:
+    # resolving stops tracking, while staying open keeps the existing cycle.
     sla_config = InboxSLAConfig.objects.filter(workspace=workspace, is_active=True).first()
     if sla_config and sla_config.auto_resolve_on_reply:
-        message.status = InboxMessage.Status.RESOLVED
-        message.save(update_fields=["status"])
+        extra_changed = sla.transition_status(message, InboxMessage.Status.RESOLVED)
+        message.save(update_fields=["status"] + (["extra"] if extra_changed else []))
     elif message.status == InboxMessage.Status.UNREAD:
-        message.status = InboxMessage.Status.OPEN
+        sla.transition_status(message, InboxMessage.Status.OPEN)
         message.save(update_fields=["status"])
 
     context = {"reply": reply, "workspace": workspace, "message": message}
@@ -314,7 +317,9 @@ def assign_message(request, workspace_id, message_id):
     else:
         message.assigned_to = None
 
-    message.save(update_fields=["assigned_to"])
+    # Re-arm overdue alerting for the new owner without resetting the clock.
+    extra_changed = sla.on_reassign(message)
+    message.save(update_fields=["assigned_to"] + (["extra"] if extra_changed else []))
 
     # Notify the assignee
     if message.assigned_to and message.assigned_to != request.user:
@@ -348,8 +353,10 @@ def change_status(request, workspace_id, message_id):
     if not form.is_valid():
         return HttpResponse("Invalid status.", status=400)
 
-    message.status = form.cleaned_data["status"]
-    message.save(update_fields=["status"])
+    # transition_status restarts the SLA clock on reopen and clears it on
+    # resolve/archive, keeping the worker, badge and views consistent.
+    extra_changed = sla.transition_status(message, form.cleaned_data["status"])
+    message.save(update_fields=["status"] + (["extra"] if extra_changed else []))
 
     context = _detail_context(workspace, message)
     return render(request, "inbox/partials/_message_panel.html", context)
@@ -408,6 +415,11 @@ def bulk_action(request, workspace_id):
         membership = WorkspaceMembership.objects.filter(workspace=workspace, user_id=value).first()
         if membership:
             qs.update(assigned_to=membership.user)
+            # Bulk assignment is a reassignment too: re-arm overdue alerting so
+            # the new owner is notified on the next worker pass.
+            for msg in qs.filter(status__in=sla.PENDING_STATUSES):
+                if sla.on_reassign(msg):
+                    msg.save(update_fields=["extra"])
 
     # Re-fetch and return updated list
     messages = InboxMessage.objects.for_workspace(workspace.id).select_related("social_account", "assigned_to")[
