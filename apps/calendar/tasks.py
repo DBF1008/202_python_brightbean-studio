@@ -1,12 +1,14 @@
 """Background tasks for the Content Calendar (F-2.3)."""
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from dateutil.relativedelta import relativedelta
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from apps.composer.models import PlatformPost, Post, PostMedia
+from apps.composer.services import sync_post_scheduled_at
 
 from .models import RecurrenceRule
 
@@ -19,8 +21,16 @@ def generate_recurring_posts():
     """Generate individual Post records from active RecurrenceRules.
 
     Runs daily. For each active rule, computes recurrence dates from the
-    source post's scheduled_at up to 90 days ahead. Creates clones of the
-    source post for each date not yet generated.
+    source post's scheduled_at up to 90 days ahead and creates a clone of the
+    source post for every occurrence not yet generated.
+
+    Idempotency is anchored on the stable ``(recurrence_source, recurrence_date)``
+    lineage stored on each generated post rather than on its mutable content.
+    This means the task is safe to re-run, and editing the source post's
+    caption, category, or attachments never causes a missed, duplicated, or
+    falsely-skipped occurrence. A partial unique constraint on those two
+    columns backs this up at the database level, so even concurrent runs
+    cannot double-create the same occurrence.
     """
     rules = RecurrenceRule.objects.filter(is_active=True).select_related("post")
     now = timezone.now()
@@ -32,40 +42,51 @@ def generate_recurring_posts():
         if not source.scheduled_at:
             continue
 
-        # Respect end_date
+        # Respect end_date, but never look further than the rolling window.
         end = rule.end_date or cutoff
         if end > cutoff:
             end = cutoff
 
-        # Compute recurrence dates
         base_date = source.scheduled_at.date()
-        base_time = source.scheduled_at.time()
-        base_tz = source.scheduled_at.tzinfo
-
         dates = _compute_recurrence_dates(base_date, rule.frequency, rule.interval, end)
 
-        # Filter out dates already generated (posts with same source scheduled time)
-        existing_dates = set(
-            Post.objects.filter(
-                workspace=source.workspace,
-                caption=source.caption,
-                scheduled_at__date__in=dates,
-            )
-            .exclude(id=source.id)
-            .values_list("scheduled_at__date", flat=True)
-        )
+        # Occurrences already materialised for *this* rule, identified by their
+        # immutable occurrence date — independent of any later content edits.
+        existing_dates = set(rule.generated_posts.values_list("recurrence_date", flat=True))
 
         for d in dates:
             if d in existing_dates or d <= now.date():
                 continue
+            if _generate_occurrence(rule, source, d):
+                generated_total += 1
 
-            from datetime import datetime
+        rule.last_generated_at = now
+        rule.save(update_fields=["last_generated_at"])
 
-            scheduled_dt = datetime.combine(d, base_time)
-            if base_tz:
-                scheduled_dt = scheduled_dt.replace(tzinfo=base_tz)
+    logger.info("Generated %d recurring posts.", generated_total)
+    return generated_total
 
-            # Clone the post
+
+def _generate_occurrence(rule, source, occurrence_date):
+    """Clone ``source`` into a new Post for ``occurrence_date``.
+
+    The whole occurrence — base Post, per-platform children (with their time
+    offsets preserved) and media attachments — is created in a single atomic
+    block tagged with the ``(rule, occurrence_date)`` lineage. If a concurrent
+    run already created the same occurrence the partial unique constraint
+    raises ``IntegrityError``; we treat that as "already generated" and skip.
+
+    Returns ``True`` if a new occurrence was created, ``False`` otherwise.
+    """
+    base_time = source.scheduled_at.time()
+    base_tz = source.scheduled_at.tzinfo
+
+    scheduled_dt = datetime.combine(occurrence_date, base_time)
+    if base_tz:
+        scheduled_dt = scheduled_dt.replace(tzinfo=base_tz)
+
+    try:
+        with transaction.atomic():
             new_post = Post.objects.create(
                 workspace=source.workspace,
                 author=source.author,
@@ -75,16 +96,16 @@ def generate_recurring_posts():
                 tags=source.tags,
                 category=source.category,
                 scheduled_at=scheduled_dt,
+                recurrence_source=rule,
+                recurrence_date=occurrence_date,
             )
 
-            # Clone platform posts in bulk, preserving per-platform offsets
+            # Clone platform posts in bulk, preserving per-platform offsets so
+            # each recurrence keeps the same per-platform time deltas.
             source_pps = list(source.platform_posts.all())
             if source_pps:
                 new_pps = []
                 for pp in source_pps:
-                    # Preserve the offset between source PP's scheduled_at and
-                    # source post's scheduled_at, so per-platform time deltas
-                    # carry into each recurrence.
                     pp_scheduled = None
                     if pp.scheduled_at and source.scheduled_at:
                         delta = pp.scheduled_at - source.scheduled_at
@@ -102,12 +123,10 @@ def generate_recurring_posts():
                     )
                 PlatformPost.objects.bulk_create(new_pps)
 
-                # Sync Post.scheduled_at to min of children.
-                from apps.composer.services import sync_post_scheduled_at
-
+                # Sync Post.scheduled_at to the earliest child time.
                 sync_post_scheduled_at(new_post)
 
-            # Clone media attachments in bulk
+            # Clone media attachments in bulk.
             source_media = list(source.media_attachments.all())
             if source_media:
                 PostMedia.objects.bulk_create(
@@ -122,14 +141,15 @@ def generate_recurring_posts():
                         for pm in source_media
                     ]
                 )
+    except IntegrityError:
+        logger.debug(
+            "Recurrence occurrence %s for rule %s already exists; skipping.",
+            occurrence_date,
+            rule.id,
+        )
+        return False
 
-            generated_total += 1
-
-        rule.last_generated_at = now
-        rule.save(update_fields=["last_generated_at"])
-
-    logger.info("Generated %d recurring posts.", generated_total)
-    return generated_total
+    return True
 
 
 def _compute_recurrence_dates(base_date, frequency, interval, end_date):

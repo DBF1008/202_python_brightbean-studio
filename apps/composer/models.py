@@ -258,6 +258,26 @@ class Post(models.Model):
     scheduled_at = models.DateTimeField(blank=True, null=True, db_index=True)
     published_at = models.DateTimeField(blank=True, null=True)
 
+    # Recurrence lineage — set on posts auto-generated from a RecurrenceRule.
+    # Together (recurrence_source, recurrence_date) form the stable, content-
+    # independent identity of a single recurrence occurrence, so the generator
+    # can be re-run idempotently even after the source post's caption,
+    # category, or attachments are edited. NULL for manually-authored posts and
+    # for the recurrence's own source post.
+    recurrence_source = models.ForeignKey(
+        "calendar.RecurrenceRule",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="generated_posts",
+        help_text="The recurrence rule that generated this post (NULL for source/manual posts).",
+    )
+    recurrence_date = models.DateField(
+        null=True,
+        blank=True,
+        help_text="The recurrence occurrence date this generated post represents.",
+    )
+
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -267,6 +287,17 @@ class Post(models.Model):
     class Meta:
         db_table = "composer_post"
         ordering = ["-created_at"]
+        constraints = [
+            # One post per (rule, occurrence date). The partial condition lets
+            # unlimited manual/source posts coexist (they have a NULL source)
+            # while guaranteeing the generator never double-creates the same
+            # occurrence, even under concurrent task runs.
+            models.UniqueConstraint(
+                fields=["recurrence_source", "recurrence_date"],
+                condition=models.Q(recurrence_source__isnull=False),
+                name="uniq_post_recurrence_source_date",
+            ),
+        ]
 
     def __str__(self):
         snippet = (self.caption[:50] + "...") if len(self.caption) > 50 else self.caption
