@@ -2,8 +2,9 @@
 
 Computes ``(captured_at, next_sync_eta)`` for the agent-facing analytics
 endpoints. ``captured_at`` is the most-recent snapshot row touched for the
-target; ``next_sync_eta`` mirrors the background sync cadence in
-``apps/analytics/tasks.py`` so callers can pick a sensible poll delay.
+target; ``next_sync_eta`` is derived from the same shared cadence resolver
+(:mod:`apps.analytics.cadence`) that the background sync uses, so the advertised
+ETA and the worker's actual schedule cannot drift.
 
 These helpers are intentionally separated from ``apps/analytics/services.py``
 because that module is consumed by Django templates today and stays
@@ -12,7 +13,7 @@ rendering-agnostic.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from django.db.models import Max
 from django.utils import timezone
@@ -20,16 +21,9 @@ from django.utils import timezone
 from apps.composer.models import PlatformPost
 from apps.social_accounts.models import SocialAccount
 
+from .cadence import ACCOUNT_SYNC_INTERVAL, FIRST_POLL_DELAY, resolve_cadence_for_account
 from .constants import NO_ANALYTICS_PLATFORMS
 from .models import AccountInsightsSnapshot, PostInsightsSnapshot
-
-# How long to wait between account-level syncs (matches the daily cadence
-# in ``apps/analytics/tasks.py``).
-_ACCOUNT_SYNC_INTERVAL = timedelta(hours=24)
-
-# Sentinel for a just-connected account / just-published post with no rows
-# yet — we want the agent to poll back soon rather than wait a full day.
-_FIRST_POLL_DELAY = timedelta(minutes=5)
 
 
 def account_freshness(
@@ -62,8 +56,8 @@ def account_freshness(
             "latest"
         ]
     if last is None:
-        return None, timezone.now() + _FIRST_POLL_DELAY
-    return last, last + _ACCOUNT_SYNC_INTERVAL
+        return None, timezone.now() + FIRST_POLL_DELAY
+    return last, last + ACCOUNT_SYNC_INTERVAL
 
 
 def post_freshness(
@@ -74,8 +68,10 @@ def post_freshness(
 ) -> tuple[datetime | None, datetime | None]:
     """Return ``(captured_at, next_sync_eta)`` for a per-platform post.
 
-    The cadence ladder is :func:`apps.analytics.tasks.post_sync_interval`
-    so this helper and the sync loop cannot drift.
+    The cadence ladder comes from
+    :meth:`apps.analytics.cadence.AnalyticsCadence.post_sync_interval` —
+    resolved through the same settings cascade the sync loop uses — so this
+    helper and the worker cannot drift.
 
     Drafts / scheduled posts (no ``published_at``) and posts on platforms
     without an analytics surface return ``(None, None)``.
@@ -88,9 +84,8 @@ def post_freshness(
     helper will fall back to its own query (``None`` is ambiguous: it
     could mean "no snapshots" OR "caller didn't check").
     """
-    from .tasks import post_sync_interval
-
-    if platform_post.social_account.platform in NO_ANALYTICS_PLATFORMS:
+    account = platform_post.social_account
+    if account.platform in NO_ANALYTICS_PLATFORMS:
         return None, None
     if not platform_post.published_at:
         return None, None
@@ -100,14 +95,16 @@ def post_freshness(
         last = PostInsightsSnapshot.objects.filter(platform_post=platform_post).aggregate(latest=Max("captured_at"))[
             "latest"
         ]
+    cadence = resolve_cadence_for_account(account)
     age = timezone.now() - platform_post.published_at
-    interval = post_sync_interval(age)
+    interval = cadence.post_sync_interval(age, account.platform)
     if interval is None:
-        # >90d: syncs have stopped, so there is no meaningful next ETA even
-        # if ``last`` exists from earlier in the post's life.
+        # Past the per-platform backfill horizon: syncs have stopped, so there
+        # is no meaningful next ETA even if ``last`` exists from earlier in the
+        # post's life.
         return last, None
     # If no rows yet, poll back sooner than the cadence would otherwise
     # suggest — we want the first-sync delay to drive the next ETA.
     if last is None:
-        return None, timezone.now() + min(interval, _FIRST_POLL_DELAY)
+        return None, timezone.now() + min(interval, FIRST_POLL_DELAY)
     return last, last + interval

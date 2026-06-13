@@ -5,11 +5,17 @@ from __future__ import annotations
 from django.core.management.base import BaseCommand, CommandError
 
 from apps.analytics.tasks import (
-    DEFAULT_BACKFILL_DAYS,
     backfill_account_analytics,
     sync_all_account_analytics,
 )
+from apps.settings_manager.defaults import APP_DEFAULTS
 from apps.social_accounts.models import AnalyticsPlatformConfig, SocialAccount
+
+# Default ``--days`` lookback when the operator doesn't pass one: the app-level
+# ``analytics.optimal_time_lookback_days``. The per-account resolved cap (the
+# platform capability, possibly lowered by a workspace/org override) still
+# bounds this inside ``backfill_account_analytics``.
+_DEFAULT_DAYS = APP_DEFAULTS["analytics.optimal_time_lookback_days"]
 
 
 class Command(BaseCommand):
@@ -23,8 +29,8 @@ class Command(BaseCommand):
         parser.add_argument(
             "--days",
             type=int,
-            default=DEFAULT_BACKFILL_DAYS,
-            help=f"Lookback window in days (default: {DEFAULT_BACKFILL_DAYS}, capped per-platform).",
+            default=_DEFAULT_DAYS,
+            help=f"Lookback window in days (default: {_DEFAULT_DAYS}, capped per-platform).",
         )
         parser.add_argument(
             "--sync-cron",

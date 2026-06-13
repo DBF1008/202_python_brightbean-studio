@@ -2,18 +2,20 @@
 
 Both run inside the existing ``process_tasks`` worker (no new infra).
 
-Cadence (per the plan's "How new metrics get pulled" section):
-  * Account-level metrics            → once per day per account
-  * Posts < 24h old                  → hourly
-  * Posts 1–7 days old               → every 6 hours
-  * Posts 7–30 days old              → daily
-  * Posts 30–90 days old             → weekly
-  * Posts > 90 days old              → stop
+Cadence is resolved per workspace through :mod:`apps.analytics.cadence`
+(settings cascade: workspace → org → app default), so it is configurable and
+the worker shares one definition with the agent-API freshness helpers
+(``apps/analytics/freshness.py``) — the two cannot drift. At default settings:
+  * Account-level metrics                         → once per day per account
+  * Posts younger than the high-frequency window  → hourly
+  * … up to 7 days old                            → every 6 hours
+  * 7–30 days old                                 → daily
+  * 30 days–per-platform backfill window          → weekly
+  * Past the per-platform backfill window         → stop
 
-The per-post cadence is exposed via :func:`post_sync_interval` so callers
-that need the same ladder (the agent-API freshness helpers in
-``apps/analytics/freshness.py``) cannot drift from what the sync loop
-actually does.
+The window is ``min(analytics.optimal_time_lookback_days, platform_cap)`` and
+the high-frequency rung is ``analytics.high_frequency_collection_hours`` —
+both read via :func:`apps.analytics.cadence.resolve_cadence_for_account`.
 """
 
 from __future__ import annotations
@@ -27,58 +29,9 @@ from background_task import background
 from django.db import transaction
 from django.utils import timezone
 
+from .cadence import ACCOUNT_METRICS_RECENT_DAYS, resolve_cadence_for_account
+
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Post-sync cadence — single source of truth.
-# ---------------------------------------------------------------------------
-
-# Tail of the per-post sync schedule. Each entry is ``(max_age, interval)`` —
-# the first row whose ``max_age`` is greater than the post's age wins. The
-# final row is ``(None, None)`` to mark the past-horizon stop.
-_POST_SYNC_CADENCE: tuple[tuple[timedelta | None, timedelta | None], ...] = (
-    (timedelta(days=1), timedelta(hours=1)),
-    (timedelta(days=7), timedelta(hours=6)),
-    (timedelta(days=30), timedelta(days=1)),
-    (timedelta(days=90), timedelta(days=7)),
-    (None, None),  # > 90 days — background sync has stopped.
-)
-
-
-def post_sync_interval(age: timedelta) -> timedelta | None:
-    """Return the sync interval for a post of the given ``age``.
-
-    ``None`` means the post is past the 90-day horizon and the background
-    sync no longer refreshes it. Shared between the sync loop
-    (``_post_cadence_due``) and the agent-API freshness helpers so the
-    two cannot drift.
-    """
-    for max_age, interval in _POST_SYNC_CADENCE:
-        if max_age is None or age < max_age:
-            return interval
-    return None  # unreachable — the table always ends in (None, None)
-
-
-# Per-platform backfill window (days) on initial connect.
-BACKFILL_DAYS_PER_PLATFORM: dict[str, int] = {
-    "facebook": 90,
-    "instagram": 90,
-    "instagram_login": 90,
-    "linkedin_company": 90,
-    "youtube": 90,
-    "pinterest": 90,
-    "threads": 90,
-    "google_business": 90,
-    "tiktok": 60,
-    # Bluesky / Mastodon / LinkedIn-Personal have no analytics surface — skip.
-    # LinkedIn only exposes share statistics for Organization URNs, not
-    # personal Person URNs, regardless of granted scopes.
-    "bluesky": 0,
-    "mastodon": 0,
-    "linkedin_personal": 0,
-}
-DEFAULT_BACKFILL_DAYS = 90
 
 
 # ---------------------------------------------------------------------------
@@ -315,14 +268,6 @@ def _write_post_snapshot(post, metric_values: dict[str, float], on_date: dt_date
 # ---------------------------------------------------------------------------
 
 
-# Number of recent days to attempt when syncing account-level metrics.
-# Some providers (YouTube Analytics) lag 1-2 days; today's call returns
-# empty for them. Iterating recent days lets finalized data backfill into
-# the snapshot table instead of being lost. Days that already have rows
-# are skipped, so on a steady-state account this costs at most one extra
-# API call when today is the only missing day.
-_ACCOUNT_METRICS_RECENT_DAYS = 3
-
 # Earliest plausible startDate for a YouTube Analytics ``/reports`` query —
 # YouTube launched 2005-02-14, so any channel's creation date is on or after
 # this. Used as the lower bound when fetching LIFETIME per-video metrics so
@@ -344,7 +289,7 @@ _POST_NON_CADENCE_METRICS_BY_PLATFORM: dict[str, frozenset[str]] = {
 def _sync_account_metrics(account, on_date: dt_date) -> None:
     """Fetch account-level metrics for ``on_date`` and any recent missing days.
 
-    Walks ``on_date`` and the prior ``_ACCOUNT_METRICS_RECENT_DAYS - 1`` days,
+    Walks ``on_date`` and the prior ``ACCOUNT_METRICS_RECENT_DAYS - 1`` days,
     skipping days that already have an :class:`AccountInsightsSnapshot`. For
     providers without lag (Instagram, Facebook) this is a no-op past
     ``on_date`` because the existing rows short-circuit the iteration.
@@ -364,7 +309,7 @@ def _sync_account_metrics(account, on_date: dt_date) -> None:
     # historical observations — that fabricates fake history. Run only the
     # current day for them; backfill of true historical values is impossible
     # without an API that supports it.
-    recent_days = _ACCOUNT_METRICS_RECENT_DAYS if getattr(provider, "account_metrics_supports_date_range", True) else 1
+    recent_days = ACCOUNT_METRICS_RECENT_DAYS if getattr(provider, "account_metrics_supports_date_range", True) else 1
     for offset in range(recent_days):
         target = on_date - timedelta(days=offset)
         if AccountInsightsSnapshot.objects.filter(social_account=account, date=target).exists():
@@ -469,7 +414,7 @@ def _mark_needs_reconnect(account):
     account.save(update_fields=["analytics_needs_reconnect", "updated_at"])
 
 
-def _post_cadence_due(post, now=None, *, platform: str | None = None) -> bool:
+def _post_cadence_due(post, now=None, *, platform: str | None = None, cadence) -> bool:
     """Decide whether ``post`` is due for a new ``_sync_post_metrics`` sync.
 
     Looks at the latest ``PostInsightsSnapshot.captured_at`` for ``post`` and
@@ -480,26 +425,31 @@ def _post_cadence_due(post, now=None, *, platform: str | None = None) -> bool:
     :func:`_sync_youtube_post_analytics`) doesn't reset the cadence and
     starve the Data-API loop of refreshes.
 
-    ``platform`` may be supplied by callers iterating posts of a known
-    account to avoid the implicit ``post.social_account.platform`` lookup.
+    ``cadence`` is the resolved :class:`apps.analytics.cadence.AnalyticsCadence`
+    for the post's workspace — the caller resolves it once per account and the
+    agent-API freshness helper resolves the same one, so the worker's "is it
+    due?" and the advertised ``next_sync_eta`` use an identical interval and
+    per-platform stop horizon. ``platform`` may be supplied by callers
+    iterating posts of a known account to avoid the implicit
+    ``post.social_account.platform`` lookup.
     """
     from .models import PostInsightsSnapshot
 
     now = now or timezone.now()
     if not post.published_at:
         return False
-    cadence = post_sync_interval(now - post.published_at)
-    if cadence is None:
-        return False  # past the 90-day horizon.
-    qs = PostInsightsSnapshot.objects.filter(platform_post=post)
     platform = platform or post.social_account.platform
+    interval = cadence.post_sync_interval(now - post.published_at, platform)
+    if interval is None:
+        return False  # past the per-platform backfill horizon.
+    qs = PostInsightsSnapshot.objects.filter(platform_post=post)
     excluded = _POST_NON_CADENCE_METRICS_BY_PLATFORM.get(platform)
     if excluded:
         qs = qs.exclude(metric_key__in=excluded)
     last = qs.order_by("-captured_at").values_list("captured_at", flat=True).first()
     if last is None:
         return True
-    return (now - last) >= cadence
+    return (now - last) >= interval
 
 
 # ---------------------------------------------------------------------------
@@ -528,7 +478,8 @@ def backfill_account_analytics(account_id: str, days: int | None = None) -> None
     enabled = set(AnalyticsPlatformConfig.enabled_platforms())
     if account.platform not in enabled:
         return
-    cap = BACKFILL_DAYS_PER_PLATFORM.get(account.platform, DEFAULT_BACKFILL_DAYS)
+    cadence = resolve_cadence_for_account(account)
+    cap = cadence.backfill_window_days(account.platform)
     if cap == 0:
         return
     days = min(days or cap, cap)
@@ -570,8 +521,12 @@ def sync_all_account_analytics() -> None:
         if not AccountInsightsSnapshot.objects.filter(social_account=account, date=today).exists():
             _sync_account_metrics(account, today)
 
-        # Per-post: only those whose cadence window has elapsed
-        cap_days = BACKFILL_DAYS_PER_PLATFORM.get(account.platform, DEFAULT_BACKFILL_DAYS)
+        # Per-post: only those whose cadence window has elapsed. Resolve the
+        # workspace's cadence once per account and reuse it for the candidate
+        # cutoff and every per-post due check (same resolver the API uses, so
+        # the worker and the advertised next_sync_eta can't drift).
+        cadence = resolve_cadence_for_account(account)
+        cap_days = cadence.backfill_window_days(account.platform)
         if cap_days == 0:
             continue
         cutoff = timezone.now() - timedelta(days=cap_days)
@@ -581,5 +536,5 @@ def sync_all_account_analytics() -> None:
             published_at__gte=cutoff,
         ).exclude(platform_post_id="")
         for post in posts:
-            if _post_cadence_due(post, platform=account.platform):
+            if _post_cadence_due(post, platform=account.platform, cadence=cadence):
                 _sync_post_metrics(post, today)
