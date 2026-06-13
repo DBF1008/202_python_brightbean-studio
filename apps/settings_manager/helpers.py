@@ -39,3 +39,14 @@ def get_setting(workspace_id, key, workspace_org_id=None):
 
     # 3. Fall back to application default
     return APP_DEFAULTS.get(key)
+
+
+def get_global_setting(key):
+    """Return the application-default value for a global (infra-tier) setting.
+
+    Some settings (e.g. ``infra.max_concurrent_publish_jobs``) govern work that
+    spans the whole deployment rather than a single workspace or org, so they
+    have no per-workspace/per-org override tier — they resolve at the
+    application-default tier only.
+    """
+    return APP_DEFAULTS.get(key)

@@ -6,6 +6,12 @@ from unittest.mock import MagicMock, patch
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
+from apps.publisher.config import (
+    DEFAULT_RETRY_BACKOFF,
+    parse_backoff_schedule,
+    resolve_max_concurrent_publish_jobs,
+    resolve_publish_config,
+)
 from apps.publisher.engine import MAX_RETRIES, RETRY_BACKOFF, PublishEngine
 from apps.publisher.models import PublishLog, RateLimitState
 from providers.types import AuthType, PostType, PublishResult
@@ -238,3 +244,161 @@ class NonRetryableFailureTest(TestCase):
         self.assertEqual(self.platform_post.retry_count, 1)
         self.assertIsNotNone(self.platform_post.next_retry_at)
         self.assertEqual(PublishLog.objects.filter(platform_post=self.platform_post).count(), 1)
+
+
+class BackoffScheduleParsingTest(SimpleTestCase):
+    """parse_backoff_schedule tolerates the spec string form and edge cases."""
+
+    def test_parses_spec_default_string(self):
+        self.assertEqual(parse_backoff_schedule("1min,5min,30min"), [60, 300, 1800])
+
+    def test_parses_mixed_units(self):
+        self.assertEqual(parse_backoff_schedule("30s,2min,1h"), [30, 120, 3600])
+
+    def test_skips_invalid_tokens(self):
+        self.assertEqual(parse_backoff_schedule("5min,bogus,30s"), [300, 30])
+
+    def test_empty_or_garbage_falls_back_to_default(self):
+        self.assertEqual(parse_backoff_schedule(""), DEFAULT_RETRY_BACKOFF)
+        self.assertEqual(parse_backoff_schedule("nope"), DEFAULT_RETRY_BACKOFF)
+
+    def test_none_falls_back_to_default(self):
+        self.assertEqual(parse_backoff_schedule(None), DEFAULT_RETRY_BACKOFF)
+
+    def test_list_passthrough(self):
+        self.assertEqual(parse_backoff_schedule([10, 20]), [10, 20])
+
+    def test_returns_independent_default_list(self):
+        # Must not hand back the shared module-level default list (mutation safety).
+        result = parse_backoff_schedule(None)
+        self.assertEqual(result, DEFAULT_RETRY_BACKOFF)
+        self.assertIsNot(result, DEFAULT_RETRY_BACKOFF)
+
+
+class MaxConcurrentPublishJobsTest(SimpleTestCase):
+    """The global publish-batch size resolves at the application-default tier."""
+
+    def test_default(self):
+        self.assertEqual(resolve_max_concurrent_publish_jobs(), 10)
+
+
+class PublishConfigCascadeTest(TestCase):
+    """resolve_publish_config follows workspace -> org -> app default per key."""
+
+    def setUp(self):
+        from apps.organizations.models import Organization
+        from apps.workspaces.models import Workspace
+
+        self.org = Organization.objects.create(name="Org")
+        self.workspace = Workspace.objects.create(organization=self.org, name="WS")
+
+    def test_defaults_when_no_overrides(self):
+        cfg = resolve_publish_config(self.workspace.id, self.org.id)
+        self.assertEqual(cfg.first_comment_delay, 120)
+        self.assertEqual(cfg.retry_max_attempts, 3)
+        self.assertEqual(cfg.retry_backoff, [60, 300, 1800])
+
+    def test_resolve_without_org_id_looks_up_workspace(self):
+        # Omitting the org id makes get_setting resolve it from the workspace.
+        cfg = resolve_publish_config(self.workspace.id)
+        self.assertEqual(cfg.retry_max_attempts, 3)
+
+    def test_org_override_beats_default(self):
+        from apps.settings_manager.models import OrgSetting
+
+        OrgSetting.objects.create(organization=self.org, key="publishing.retry_max_attempts", value=5)
+        OrgSetting.objects.create(organization=self.org, key="publishing.first_comment_delay_seconds", value=300)
+        OrgSetting.objects.create(organization=self.org, key="publishing.retry_backoff_schedule", value="10s,20s")
+
+        cfg = resolve_publish_config(self.workspace.id, self.org.id)
+        self.assertEqual(cfg.retry_max_attempts, 5)
+        self.assertEqual(cfg.first_comment_delay, 300)
+        self.assertEqual(cfg.retry_backoff, [10, 20])
+
+    def test_workspace_override_beats_org(self):
+        from apps.settings_manager.models import OrgSetting, WorkspaceSetting
+
+        OrgSetting.objects.create(organization=self.org, key="publishing.retry_max_attempts", value=5)
+        WorkspaceSetting.objects.create(workspace=self.workspace, key="publishing.retry_max_attempts", value=7)
+
+        cfg = resolve_publish_config(self.workspace.id, self.org.id)
+        self.assertEqual(cfg.retry_max_attempts, 7)
+
+    def test_different_workspaces_can_have_different_strategies(self):
+        from apps.settings_manager.models import WorkspaceSetting
+        from apps.workspaces.models import Workspace
+
+        other = Workspace.objects.create(organization=self.org, name="WS2")
+        WorkspaceSetting.objects.create(
+            workspace=self.workspace,
+            key="publishing.retry_backoff_schedule",
+            value="10s,20s",
+        )
+        self.assertEqual(resolve_publish_config(self.workspace.id, self.org.id).retry_backoff, [10, 20])
+        self.assertEqual(resolve_publish_config(other.id, self.org.id).retry_backoff, [60, 300, 1800])
+
+
+class PerWorkspaceRetryPolicyTest(TestCase):
+    """_schedule_retry honors the per-workspace retry config (failures + rate limits)."""
+
+    def setUp(self):
+        from apps.composer.models import Post
+        from apps.organizations.models import Organization
+        from apps.social_accounts.models import SocialAccount
+        from apps.workspaces.models import Workspace
+
+        self.org = Organization.objects.create(name="Org")
+        self.workspace = Workspace.objects.create(organization=self.org, name="WS")
+        self.account = SocialAccount.objects.create(
+            workspace=self.workspace,
+            platform="tiktok",
+            account_platform_id="tt-1",
+            account_name="janschmitz51",
+            connection_status=SocialAccount.ConnectionStatus.CONNECTED,
+        )
+        self.post = Post.objects.create(workspace=self.workspace, caption="hi")
+
+    def _make_pp(self, retry_count=0):
+        from apps.composer.models import PlatformPost
+
+        return PlatformPost.objects.create(
+            post=self.post,
+            social_account=self.account,
+            status=PlatformPost.Status.PUBLISHING,
+            retry_count=retry_count,
+        )
+
+    def test_workspace_max_attempts_fails_permanently(self):
+        from apps.composer.models import PlatformPost
+        from apps.settings_manager.models import WorkspaceSetting
+
+        WorkspaceSetting.objects.create(workspace=self.workspace, key="publishing.retry_max_attempts", value=1)
+        pp = self._make_pp(retry_count=1)
+
+        PublishEngine()._schedule_retry(pp, "boom")
+
+        pp.refresh_from_db()
+        self.assertEqual(pp.status, PlatformPost.Status.FAILED)
+        self.assertEqual(pp.retry_count, 1)
+
+    def test_workspace_backoff_override_sets_next_retry(self):
+        from apps.composer.models import PlatformPost
+        from apps.settings_manager.models import WorkspaceSetting
+
+        WorkspaceSetting.objects.create(
+            workspace=self.workspace,
+            key="publishing.retry_backoff_schedule",
+            value="10s,20s",
+        )
+        pp = self._make_pp(retry_count=0)
+        before = timezone.now()
+
+        PublishEngine()._schedule_retry(pp, "boom")
+
+        pp.refresh_from_db()
+        self.assertEqual(pp.status, PlatformPost.Status.SCHEDULED)
+        self.assertEqual(pp.retry_count, 1)
+        # First override backoff entry is 10s.
+        delta = (pp.next_retry_at - before).total_seconds()
+        self.assertGreaterEqual(delta, 9)
+        self.assertLessEqual(delta, 15)

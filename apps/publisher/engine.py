@@ -32,12 +32,23 @@ from apps.credentials.models import resolve_platform_credentials
 from providers import get_provider
 from providers.types import AuthType, PostType, PublishContent
 
+from .config import (
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_RETRY_BACKOFF,
+    resolve_max_concurrent_publish_jobs,
+    resolve_publish_config,
+    resolve_publish_config_for,
+)
 from .models import PublishLog, RateLimitState
 
 logger = logging.getLogger(__name__)
 
-# Retry backoff schedule (in seconds)
-RETRY_BACKOFF = [60, 300, 1800]  # 1min, 5min, 30min
+# Backwards-compatible module aliases for the canonical fallback defaults, which
+# now live in ``apps.publisher.config``. Per-workspace behavior comes from the
+# settings cascade (workspace -> org -> app default); these are the values used
+# when no override applies.
+RETRY_BACKOFF = DEFAULT_RETRY_BACKOFF
+MAX_RETRIES = DEFAULT_MAX_RETRIES
 
 
 def _resolve_publish_credentials(account):
@@ -78,9 +89,8 @@ def _resolve_publish_credentials(account):
     return credentials
 
 
-MAX_RETRIES = 3
-FIRST_COMMENT_DELAY = getattr(settings, "PUBLISHER_FIRST_COMMENT_DELAY", 120)
-MAX_CONCURRENT_PUBLISHES = getattr(settings, "PUBLISHER_MAX_CONCURRENT_PUBLISHES", 10)
+# Inner thread-pool fan-out for a single publish batch. This is an executor
+# sizing knob (not a cascade setting) and stays a deployment-level constant.
 MAX_CONCURRENT_POSTS = getattr(settings, "PUBLISHER_MAX_CONCURRENT_POSTS", 4)
 
 
@@ -128,7 +138,7 @@ class PublishEngine:
             .annotate(effective_at=Coalesce("scheduled_at", "post__scheduled_at"))
             .filter(effective_at__lte=now)
             .select_related("post__workspace", "social_account")
-            .order_by("effective_at")[:MAX_CONCURRENT_PUBLISHES]
+            .order_by("effective_at")[: resolve_max_concurrent_publish_jobs()]
         )
 
     def _publish_post_group(self, post, due_pps):
@@ -172,7 +182,11 @@ class PublishEngine:
         # display "last published" don't need to query every child.
         self._sync_parent_published_at(post)
 
-        # Schedule first comments for successful publishes (non-blocking)
+        # Schedule first comments for successful publishes (non-blocking).
+        # All posts in a group share one workspace, so resolve the delay once.
+        first_comment_delay = resolve_publish_config(
+            post.workspace_id, post.workspace.organization_id
+        ).first_comment_delay
         for pp in platform_posts:
             pp.refresh_from_db()
             if pp.status != PlatformPost.Status.PUBLISHED:
@@ -181,7 +195,7 @@ class PublishEngine:
                 continue
             comment_text = pp.effective_first_comment
             if comment_text:
-                _post_first_comment_task(str(pp.id), schedule=FIRST_COMMENT_DELAY)
+                _post_first_comment_task(str(pp.id), schedule=first_comment_delay)
 
     def _publish_platform_post(self, platform_post):
         """Publish a single PlatformPost to its target platform.
@@ -475,12 +489,18 @@ class PublishEngine:
         )
 
     def _schedule_retry(self, platform_post, error_msg):
-        """Schedule a retry with exponential backoff."""
-        if platform_post.retry_count >= MAX_RETRIES:
-            self._fail_permanently(platform_post, error_msg, reason=f"after {MAX_RETRIES} retries")
+        """Schedule a retry with exponential backoff (per-workspace policy).
+
+        Both ordinary publish failures and rate-limit deferrals funnel through
+        here, so retry attempts/backoff honor the same per-workspace config.
+        """
+        cfg = resolve_publish_config_for(platform_post)
+        if platform_post.retry_count >= cfg.retry_max_attempts:
+            self._fail_permanently(platform_post, error_msg, reason=f"after {cfg.retry_max_attempts} retries")
             return
 
-        backoff_seconds = RETRY_BACKOFF[min(platform_post.retry_count, len(RETRY_BACKOFF) - 1)]
+        backoff = cfg.retry_backoff
+        backoff_seconds = backoff[min(platform_post.retry_count, len(backoff) - 1)]
         platform_post.retry_count += 1
         platform_post.next_retry_at = timezone.now() + timedelta(seconds=backoff_seconds)
         # Drop back to SCHEDULED so the next _process_retries tick picks it up
@@ -499,12 +519,14 @@ class PublishEngine:
     def _process_retries(self):
         """Process platform posts that are due for retry."""
         now = timezone.now()
+        # No global retry_count cap here: the per-workspace max-attempts limit is
+        # enforced in _schedule_retry, which marks exhausted posts FAILED (so they
+        # never re-enter SCHEDULED). post__workspace is loaded for config lookup.
         retry_posts = PlatformPost.objects.filter(
             status=PlatformPost.Status.SCHEDULED,
             retry_count__gt=0,
-            retry_count__lte=MAX_RETRIES,
             next_retry_at__lte=now,
-        ).select_related("social_account", "post")
+        ).select_related("social_account", "post__workspace")
 
         for pp in retry_posts:
             try:
